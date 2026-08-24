@@ -33,11 +33,18 @@ pub fn init_db() -> Result<Connection> {
             format        TEXT NOT NULL,
             cover_path    TEXT,
             added_at      INTEGER NOT NULL,
-            progress      REAL NOT NULL DEFAULT 0
+            progress      REAL NOT NULL DEFAULT 0,
+            locator       TEXT
         )",
         [],
     )
     .context("creating books table")?;
+
+    // `locator` was added after the table above shipped; existing databases
+    // won't have it yet. Best-effort: ignore the error when it already
+    // exists (SQLite has no `ADD COLUMN IF NOT EXISTS`).
+    conn.execute("ALTER TABLE books ADD COLUMN locator TEXT", [])
+        .ok();
 
     Ok(conn)
 }
@@ -45,8 +52,8 @@ pub fn init_db() -> Result<Connection> {
 pub fn insert_book(conn: &Connection, book: &Book) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO books
-            (id, title, author, series, series_index, path, format, cover_path, added_at, progress)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            (id, title, author, series, series_index, path, format, cover_path, added_at, progress, locator)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             book.id.to_string(),
             book.title,
@@ -60,6 +67,7 @@ pub fn insert_book(conn: &Connection, book: &Book) -> Result<()> {
                 .map(|p| p.to_string_lossy().to_string()),
             book.added_at,
             book.progress,
+            book.locator,
         ],
     )
     .context("inserting book")?;
@@ -68,7 +76,7 @@ pub fn insert_book(conn: &Connection, book: &Book) -> Result<()> {
 
 pub fn list_books(conn: &Connection) -> Result<Vec<Book>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, author, series, series_index, path, format, cover_path, added_at, progress
+        "SELECT id, title, author, series, series_index, path, format, cover_path, added_at, progress, locator
          FROM books ORDER BY title COLLATE NOCASE ASC",
     )?;
 
@@ -88,6 +96,7 @@ pub fn list_books(conn: &Connection) -> Result<Vec<Book>> {
             cover_path: cover_path.map(PathBuf::from),
             added_at: row.get(8)?,
             progress: row.get(9)?,
+            locator: row.get(10)?,
         })
     })?;
 
@@ -101,12 +110,20 @@ pub fn delete_book(conn: &Connection, id: Uuid) -> Result<()> {
     Ok(())
 }
 
-pub fn update_progress(conn: &Connection, id: Uuid, progress: f64) -> Result<()> {
+/// Persists the reader's resume position: `locator` is an opaque EPUB CFI
+/// string from foliate-js, `progress` a coarse 0.0–1.0 fraction through the
+/// book.
+pub fn update_reader_position(
+    conn: &Connection,
+    id: Uuid,
+    locator: Option<&str>,
+    progress: f64,
+) -> Result<()> {
     conn.execute(
-        "UPDATE books SET progress = ?1 WHERE id = ?2",
-        params![progress, id.to_string()],
+        "UPDATE books SET locator = ?1, progress = ?2 WHERE id = ?3",
+        params![locator, progress, id.to_string()],
     )
-    .context("updating progress")?;
+    .context("updating reader position")?;
     Ok(())
 }
 
