@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -16,10 +17,16 @@ pub fn covers_dir() -> PathBuf {
     data_dir().join("covers")
 }
 
+pub fn collection_covers_dir() -> PathBuf {
+    covers_dir().join("collections")
+}
+
 pub fn init_db() -> Result<Connection> {
     let dir = data_dir();
     std::fs::create_dir_all(&dir).context("creating data directory")?;
     std::fs::create_dir_all(covers_dir()).context("creating covers directory")?;
+    std::fs::create_dir_all(collection_covers_dir())
+        .context("creating collection covers directory")?;
 
     let conn = Connection::open(dir.join("library.db")).context("opening library database")?;
     conn.execute(
@@ -45,6 +52,17 @@ pub fn init_db() -> Result<Connection> {
     // exists (SQLite has no `ADD COLUMN IF NOT EXISTS`).
     conn.execute("ALTER TABLE books ADD COLUMN locator TEXT", [])
         .ok();
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS collection_covers (
+            kind        TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            cover_path  TEXT NOT NULL,
+            PRIMARY KEY (kind, name)
+        )",
+        [],
+    )
+    .context("creating collection_covers table")?;
 
     Ok(conn)
 }
@@ -135,3 +153,38 @@ pub fn book_exists_at(conn: &Connection, path: &Path) -> Result<bool> {
     )?;
     Ok(count > 0)
 }
+
+/// Persists a user-chosen cover image for an author or series tile (see
+/// `ui/collection_card.rs`'s "Set Cover Image…" context menu entry).
+pub fn set_collection_cover(conn: &Connection, kind: &str, name: &str, cover_path: &Path) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO collection_covers (kind, name, cover_path) VALUES (?1, ?2, ?3)",
+        params![kind, name, cover_path.to_string_lossy()],
+    )
+    .context("setting collection cover")?;
+    Ok(())
+}
+
+pub fn remove_collection_cover(conn: &Connection, kind: &str, name: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM collection_covers WHERE kind = ?1 AND name = ?2",
+        params![kind, name],
+    )
+    .context("removing collection cover")?;
+    Ok(())
+}
+
+/// One bulk query for every custom cover of a given kind ("author"/"series"),
+/// keyed by name — used when building a whole tile grid at once.
+pub fn all_collection_covers(conn: &Connection, kind: &str) -> Result<HashMap<String, PathBuf>> {
+    let mut stmt =
+        conn.prepare("SELECT name, cover_path FROM collection_covers WHERE kind = ?1")?;
+    let rows = stmt.query_map(params![kind], |row| {
+        let name: String = row.get(0)?;
+        let cover_path: String = row.get(1)?;
+        Ok((name, PathBuf::from(cover_path)))
+    })?;
+    rows.collect::<rusqlite::Result<HashMap<_, _>>>()
+        .context("listing collection covers")
+}
+
