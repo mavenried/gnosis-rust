@@ -61,8 +61,9 @@ pub fn scan_epub(path: &Path) -> Result<Book> {
     let title = doc.get_title().unwrap_or_else(|| fallback_title(path));
 
     let author = doc.mdata("creator").map(|item| item.value.clone());
+    let (series, series_index) = parse_series(&doc);
 
-    let cover_path = match doc.get_cover() {
+    let cover_path = match doc.get_cover().or_else(|| legacy_cover(&mut doc)) {
         Some((bytes, mime)) => Some(save_cover(id, &bytes, &mime)?),
         None => None,
     };
@@ -71,14 +72,58 @@ pub fn scan_epub(path: &Path) -> Result<Book> {
         id,
         title,
         author,
-        series: None,
-        series_index: None,
+        series,
+        series_index,
         path: path.to_path_buf(),
         format: "epub".to_string(),
         cover_path,
         added_at: Book::now(),
         progress: 0.0,
+        locator: None,
     })
+}
+
+/// EPUBs express series membership two different ways in the wild: EPUB3's
+/// `belongs-to-collection` meta (book number in its `group-position`
+/// refinement), and the much more common Calibre convention of plain
+/// `calibre:series`/`calibre:series_index` `<meta name content>` pairs.
+/// Prefers whichever is present, EPUB3 first.
+fn parse_series<R: std::io::Read + std::io::Seek>(
+    doc: &EpubDoc<R>,
+) -> (Option<String>, Option<f64>) {
+    if let Some(item) = doc
+        .metadata
+        .iter()
+        .find(|item| item.property == "belongs-to-collection" && !item.value.trim().is_empty())
+    {
+        let index = item
+            .refinement("group-position")
+            .and_then(|r| r.value.trim().parse::<f64>().ok());
+        return (Some(item.value.clone()), index);
+    }
+
+    let series = doc
+        .mdata("calibre:series")
+        .map(|item| item.value.clone())
+        .filter(|s| !s.trim().is_empty());
+    let index = doc
+        .mdata("calibre:series_index")
+        .and_then(|item| item.value.trim().parse::<f64>().ok());
+
+    (series, index)
+}
+
+/// `EpubDoc::get_cover()` only finds a cover via the manifest item's
+/// EPUB3 `properties="cover-image"` attribute for version-3.0 packages —
+/// but plenty of real-world EPUB3 files still declare their cover the old
+/// EPUB2 way, `<meta name="cover" content="ITEM-ID"/>`, without ever
+/// setting `properties` on the matching manifest item. Resolves that
+/// legacy declaration by hand when the normal lookup misses.
+fn legacy_cover<R: std::io::Read + std::io::Seek>(
+    doc: &mut EpubDoc<R>,
+) -> Option<(Vec<u8>, String)> {
+    let id = doc.mdata("cover")?.value.clone();
+    doc.get_resource(&id)
 }
 
 fn fallback_title(path: &Path) -> String {
