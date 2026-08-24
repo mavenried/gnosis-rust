@@ -66,19 +66,33 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
         .vexpand(true)
         .hexpand(true)
         .build();
-    web_view.load_uri(&format!("{}:///shell/reader.html", reader_scheme::SCHEME));
 
     // Restore the last-used theme/font/size (see build_display_settings())
-    // as soon as the shell's module script is ready, so the very first book
-    // opened this session already renders with them rather than defaults.
+    // once the shell page has actually finished loading, so the very first
+    // book opened this session already renders with them rather than
+    // defaults. Injecting this in the same tick as `load_uri` below (as a
+    // "poll until window.gnosisSetStyle exists" script, like every other
+    // evaluate_javascript call in this file) doesn't work here specifically:
+    // unlike those other calls — always made long after the shell has
+    // already loaded — this one runs before navigation to reader.html even
+    // starts, so it targets the pre-navigation context; that context (and
+    // its pending poll) is torn down when the real page loads, and the
+    // restore silently never happens even though it looks like it should.
     let saved_prefs = library::reader_prefs::load();
-    web_view.evaluate_javascript(
-        &initial_style_script(&saved_prefs),
-        None,
-        None,
-        gio::Cancellable::NONE,
-        |_| {},
-    );
+    let web_view_for_restore = web_view.clone();
+    let restore_script = initial_style_script(&saved_prefs);
+    web_view.connect_load_changed(move |_, event| {
+        if event == webkit6::LoadEvent::Finished {
+            web_view_for_restore.evaluate_javascript(
+                &restore_script,
+                None,
+                None,
+                gio::Cancellable::NONE,
+                |_| {},
+            );
+        }
+    });
+    web_view.load_uri(&format!("{}:///shell/reader.html", reader_scheme::SCHEME));
 
     let title_widget = adw::WindowTitle::new("", "");
     let toc_menu = gio::Menu::new();
@@ -450,4 +464,5 @@ fn prev_script() -> &'static str {
 fn next_script() -> &'static str {
     "if (window.gnosisNext) window.gnosisNext();"
 }
+
 
