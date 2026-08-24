@@ -1,7 +1,8 @@
-# Gnosis
-
+<h1 align="center">Gnosis</h1>
+<p align="center">
 A beautiful, practical ebook library manager for GTK, drawing its reading
-experience from [Foliate](https://github.com/johnfactotum/foliate).
+experience from <a href="https://github.com/johnfactotum/foliate">Foliate</a>.
+</p>
 
 ## Features
 
