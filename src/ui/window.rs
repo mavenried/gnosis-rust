@@ -5,6 +5,7 @@ use adw::prelude::*;
 use adw::subclass::prelude::ObjectSubclassIsExt;
 use gtk::{gio, glib};
 use rusqlite::Connection;
+use webkit6::prelude::*;
 
 use uuid::Uuid;
 
@@ -13,6 +14,16 @@ use crate::library;
 
 use super::book_card;
 use super::book_object::BookObject;
+use super::collection_card;
+use super::collection_object::{CollectionKind, CollectionObject};
+
+/// Which background library-maintenance operation is running — see
+/// `GnosisWindow::set_maintenance_active`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MaintenanceOp {
+    Refresh,
+    RescanSeries,
+}
 
 /// How an "Edit Metadata" save should affect the underlying EPUB file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,13 +55,21 @@ mod imp {
         pub refresh_button: OnceCell<gtk::Button>,
         pub refresh_stack: OnceCell<gtk::Stack>,
         pub refresh_spinner: OnceCell<gtk::Spinner>,
+        pub rescan_button: OnceCell<gtk::Button>,
+        pub rescan_stack: OnceCell<gtk::Stack>,
+        pub rescan_spinner: OnceCell<gtk::Spinner>,
         pub progress_box: OnceCell<gtk::Box>,
         pub progress_label: OnceCell<gtk::Label>,
         pub progress_spinner: OnceCell<gtk::Spinner>,
         pub refreshing: Cell<bool>,
+        pub reader: OnceCell<crate::ui::reader::ReaderWidgets>,
+        pub reader_book_id: RefCell<Option<uuid::Uuid>>,
         pub search_query: Rc<RefCell<String>>,
         pub sort_key: Rc<RefCell<String>>,
         pub db: OnceCell<Rc<RefCell<Connection>>>,
+        pub authors_store: OnceCell<gtk::gio::ListStore>,
+        pub series_store: OnceCell<gtk::gio::ListStore>,
+        pub collection_detail: OnceCell<crate::ui::collection_detail::CollectionDetailWidgets>,
     }
 
     #[glib::object_subclass]
@@ -96,11 +115,14 @@ impl GnosisWindow {
         };
 
         let imp = self.imp();
+        // Set before appending: appending fires `items_changed`, which
+        // triggers `rebuild_collections`, which needs the database to read
+        // custom collection covers.
+        imp.db.set(db).ok();
         let store = imp.store.get().expect("store built in constructed()");
         for book in books {
             store.append(&BookObject::new(book));
         }
-        imp.db.set(db).ok();
 
         self.update_empty_state();
     }
@@ -114,7 +136,7 @@ impl GnosisWindow {
         let store = gio::ListStore::new::<BookObject>();
 
         let search_query = imp.search_query.clone();
-        let filter = gtk::CustomFilter::new(move |obj| {
+        let search_filter = gtk::CustomFilter::new(move |obj| {
             let query = search_query.borrow();
             if query.is_empty() {
                 return true;
@@ -133,7 +155,17 @@ impl GnosisWindow {
                     .contains(&query)
         });
 
-        let filter_model = gtk::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
+        // The sidebar (Status) appends its own filter onto this —
+        // every_filter AND-combines all of them.
+        let every_filter = gtk::EveryFilter::new();
+        every_filter.append(search_filter.clone());
+        // Populated with "books"/"authors"/"series" children below, once
+        // they're built; the sidebar's Browse rows just switch its visible
+        // child, so it only needs to exist (not be populated yet) here.
+        let library_view_stack = gtk::Stack::new();
+        let sidebar_widget = super::library_sidebar::build(&every_filter, &library_view_stack);
+
+        let filter_model = gtk::FilterListModel::new(Some(store.clone()), Some(every_filter));
 
         *imp.sort_key.borrow_mut() = "title".to_string();
         let sort_key = imp.sort_key.clone();
@@ -154,6 +186,28 @@ impl GnosisWindow {
                     .cmp(&b.author.as_deref().unwrap_or_default().to_lowercase())
                     .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
                 "added" => b.added_at.cmp(&a.added_at),
+                "series" => {
+                    let a_has_series = a.series.is_some();
+                    let b_has_series = b.series.is_some();
+                    // Standalone books (no series) sort after every named
+                    // series, grouped together at the end.
+                    a_has_series
+                        .cmp(&b_has_series)
+                        .reverse()
+                        .then_with(|| {
+                            a.series
+                                .as_deref()
+                                .unwrap_or_default()
+                                .to_lowercase()
+                                .cmp(&b.series.as_deref().unwrap_or_default().to_lowercase())
+                        })
+                        .then_with(|| {
+                            a.series_index
+                                .partial_cmp(&b.series_index)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+                }
                 _ => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
             };
 
@@ -186,7 +240,7 @@ impl GnosisWindow {
             let Some(book_object) = model.item(position).and_downcast::<BookObject>() else {
                 return;
             };
-            window.show_reader_stub(&book_object.book());
+            window.open_reader(&book_object.book());
         });
 
         let scrolled = gtk::ScrolledWindow::builder()
@@ -213,13 +267,85 @@ impl GnosisWindow {
         stack.add_named(&empty_page, Some("empty"));
         stack.add_named(&scrolled, Some("library"));
 
+        // Authors/Series tile grids (music-player-style browsable
+        // destinations, not filters — see collection_card.rs). Populated by
+        // `rebuild_collections`, called whenever `store` changes.
+        let authors_store = gio::ListStore::new::<CollectionObject>();
+        let series_store = gio::ListStore::new::<CollectionObject>();
+
+        let authors_grid = gtk::GridView::new(
+            Some(gtk::NoSelection::new(Some(authors_store.clone()))),
+            Some(collection_card::factory()),
+        );
+        authors_grid.set_single_click_activate(false);
+        authors_grid.set_min_columns(2);
+        authors_grid.set_max_columns(64);
+        let window_weak = self.downgrade();
+        authors_grid.connect_activate(move |grid_view, position| {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let Some(model) = grid_view.model() else {
+                return;
+            };
+            let Some(collection_object) = model.item(position).and_downcast::<CollectionObject>()
+            else {
+                return;
+            };
+            let data = collection_object.data();
+            window.open_collection(data.kind, &data.name);
+        });
+        let authors_scrolled = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .child(&authors_grid)
+            .build();
+
+        let series_grid = gtk::GridView::new(
+            Some(gtk::NoSelection::new(Some(series_store.clone()))),
+            Some(collection_card::factory()),
+        );
+        series_grid.set_single_click_activate(false);
+        series_grid.set_min_columns(2);
+        series_grid.set_max_columns(64);
+        let window_weak = self.downgrade();
+        series_grid.connect_activate(move |grid_view, position| {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let Some(model) = grid_view.model() else {
+                return;
+            };
+            let Some(collection_object) = model.item(position).and_downcast::<CollectionObject>()
+            else {
+                return;
+            };
+            let data = collection_object.data();
+            window.open_collection(data.kind, &data.name);
+        });
+        let series_scrolled = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .child(&series_grid)
+            .build();
+
+        library_view_stack.add_named(&stack, Some("books"));
+        library_view_stack.add_named(&authors_scrolled, Some("authors"));
+        library_view_stack.add_named(&series_scrolled, Some("series"));
+        library_view_stack.set_visible_child_name("books");
+
+        let window_weak = self.downgrade();
+        store.connect_items_changed(move |_, _, _, _| {
+            if let Some(window) = window_weak.upgrade() {
+                window.rebuild_collections();
+            }
+        });
+
         let search_entry = gtk::SearchEntry::builder()
             .placeholder_text("Search your library")
             .build();
         let query_slot = imp.search_query.clone();
         search_entry.connect_search_changed(move |entry| {
             *query_slot.borrow_mut() = entry.text().to_string();
-            filter.changed(gtk::FilterChange::Different);
+            search_filter.changed(gtk::FilterChange::Different);
         });
 
         let add_button = gtk::Button::from_icon_name("list-add-symbolic");
@@ -238,6 +364,7 @@ impl GnosisWindow {
         sort_menu.append(Some("Title"), Some("win.sort-by('title')"));
         sort_menu.append(Some("Author"), Some("win.sort-by('author')"));
         sort_menu.append(Some("Date Added"), Some("win.sort-by('added')"));
+        sort_menu.append(Some("Series"), Some("win.sort-by('series')"));
         let sort_button = gtk::MenuButton::builder()
             .icon_name("view-sort-descending-symbolic")
             .tooltip_text("Sort")
@@ -260,8 +387,25 @@ impl GnosisWindow {
         });
         self.add_action(&sort_action);
 
+        let split_view = adw::OverlaySplitView::builder()
+            .sidebar(&sidebar_widget)
+            .content(&library_view_stack)
+            .build();
+
+        let sidebar_toggle = gtk::ToggleButton::builder()
+            .icon_name("sidebar-show-symbolic")
+            .tooltip_text("Toggle Sidebar")
+            .active(true)
+            .build();
+        split_view
+            .bind_property("show-sidebar", &sidebar_toggle, "active")
+            .bidirectional()
+            .sync_create()
+            .build();
+
         let header_bar = adw::HeaderBar::new();
         header_bar.set_title_widget(Some(&adw::WindowTitle::new("Gnosis", "")));
+        header_bar.pack_start(&sidebar_toggle);
         header_bar.pack_start(&search_entry);
         header_bar.pack_end(&add_button);
         header_bar.pack_end(&settings_button);
@@ -269,10 +413,12 @@ impl GnosisWindow {
 
         let toolbar_view = adw::ToolbarView::new();
         toolbar_view.add_top_bar(&header_bar);
-        toolbar_view.set_content(Some(&stack));
+        toolbar_view.set_content(Some(&split_view));
         let library_page = adw::NavigationPage::with_tag(&toolbar_view, "Gnosis", "library");
 
         let settings = super::preferences::build_page(self);
+        let reader = super::reader::build(self);
+        let collection_detail = super::collection_detail::build(&store, self);
 
         let nav_view = adw::NavigationView::new();
         nav_view.push(&library_page);
@@ -311,9 +457,16 @@ impl GnosisWindow {
         imp.refresh_button.set(settings.refresh_button).ok();
         imp.refresh_stack.set(settings.refresh_stack).ok();
         imp.refresh_spinner.set(settings.refresh_spinner).ok();
+        imp.rescan_button.set(settings.rescan_button).ok();
+        imp.rescan_stack.set(settings.rescan_stack).ok();
+        imp.rescan_spinner.set(settings.rescan_spinner).ok();
         imp.progress_box.set(progress_box).ok();
         imp.progress_label.set(progress_label).ok();
         imp.progress_spinner.set(progress_spinner).ok();
+        imp.reader.set(reader).ok();
+        imp.authors_store.set(authors_store).ok();
+        imp.series_store.set(series_store).ok();
+        imp.collection_detail.set(collection_detail).ok();
 
         self.setup_actions();
 
@@ -355,6 +508,29 @@ impl GnosisWindow {
     }
 
     fn setup_actions(&self) {
+        let reader_goto_action =
+            gio::SimpleAction::new("reader-goto", Some(glib::VariantTy::STRING));
+        let window_weak = self.downgrade();
+        reader_goto_action.connect_activate(move |_, parameter| {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let Some(href) = parameter.and_then(glib::Variant::str) else {
+                return;
+            };
+            if let Some(reader) = window.imp().reader.get() {
+                let script = super::reader::goto_script(href);
+                reader.web_view.evaluate_javascript(
+                    &script,
+                    None,
+                    None,
+                    gio::Cancellable::NONE,
+                    |_| {},
+                );
+            }
+        });
+        self.add_action(&reader_goto_action);
+
         let add_book_action = gio::SimpleAction::new("add-book", None);
         let window_weak = self.downgrade();
         add_book_action.connect_activate(move |_, _| {
@@ -404,6 +580,50 @@ impl GnosisWindow {
             window.remove_book(id);
         });
         self.add_action(&remove_action);
+
+        let collection_target_type = glib::VariantTy::new("(ss)").expect("valid variant type");
+
+        let open_collection_action =
+            gio::SimpleAction::new("open-collection", Some(collection_target_type));
+        let window_weak = self.downgrade();
+        open_collection_action.connect_activate(move |_, parameter| {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let Some((kind, name)) = collection_kind_and_name(parameter) else {
+                return;
+            };
+            window.open_collection(kind, &name);
+        });
+        self.add_action(&open_collection_action);
+
+        let set_cover_action =
+            gio::SimpleAction::new("set-collection-cover", Some(collection_target_type));
+        let window_weak = self.downgrade();
+        set_cover_action.connect_activate(move |_, parameter| {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let Some((kind, name)) = collection_kind_and_name(parameter) else {
+                return;
+            };
+            window.pick_collection_cover(kind, name);
+        });
+        self.add_action(&set_cover_action);
+
+        let remove_cover_action =
+            gio::SimpleAction::new("remove-collection-cover", Some(collection_target_type));
+        let window_weak = self.downgrade();
+        remove_cover_action.connect_activate(move |_, parameter| {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let Some((kind, name)) = collection_kind_and_name(parameter) else {
+                return;
+            };
+            window.remove_collection_cover(kind, &name);
+        });
+        self.add_action(&remove_cover_action);
     }
 
     fn show_settings(&self) {
@@ -776,8 +996,8 @@ impl GnosisWindow {
         }
 
         imp.refreshing.set(true);
-        self.set_refresh_active(true);
-        self.update_progress_text(0, total);
+        self.set_maintenance_active(MaintenanceOp::Refresh, true);
+        self.update_progress_text("Refreshing library", 0, total);
 
         let state = Rc::new(RefCell::new(RefreshQueueState {
             queue: ids.into(),
@@ -862,7 +1082,7 @@ impl GnosisWindow {
         s.done += 1;
         let (done, total) = (s.done, s.total);
         drop(s);
-        self.update_progress_text(done, total);
+        self.update_progress_text("Refreshing library", done, total);
 
         glib::ControlFlow::Continue
     }
@@ -870,7 +1090,7 @@ impl GnosisWindow {
     fn finish_refresh(&self, tally: RefreshTally) {
         let imp = self.imp();
         imp.refreshing.set(false);
-        self.set_refresh_active(false);
+        self.set_maintenance_active(MaintenanceOp::Refresh, false);
 
         if tally.refreshed > 0 {
             if let Some(store) = imp.store.get() {
@@ -901,17 +1121,162 @@ impl GnosisWindow {
         self.show_toast(&message);
     }
 
-    fn set_refresh_active(&self, active: bool) {
+    /// Re-reads *only* series/series_index from every book's file — unlike
+    /// `refresh_all_metadata`, which deliberately leaves them untouched.
+    /// Exists specifically to backfill books added while series parsing was
+    /// broken; leaves everything else (title, author, cover, progress,
+    /// resume position) exactly as-is.
+    pub fn rescan_series(&self) {
+        let imp = self.imp();
+        if imp.refreshing.get() {
+            return;
+        }
+        let Some(store) = imp.store.get() else {
+            return;
+        };
+
+        let ids: Vec<Uuid> = (0..store.n_items())
+            .filter_map(|i| store.item(i).and_downcast::<BookObject>())
+            .map(|object| object.book().id)
+            .collect();
+        let total = ids.len();
+
+        if total == 0 {
+            self.finish_series_rescan(SeriesRescanTally::default());
+            return;
+        }
+
+        imp.refreshing.set(true);
+        self.set_maintenance_active(MaintenanceOp::RescanSeries, true);
+        self.update_progress_text("Rescanning series", 0, total);
+
+        let state = Rc::new(RefCell::new(SeriesRescanState {
+            queue: ids.into(),
+            total,
+            done: 0,
+            tally: SeriesRescanTally::default(),
+        }));
+
+        let window_weak = self.downgrade();
+        glib::idle_add_local(move || {
+            let Some(window) = window_weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            window.process_series_rescan_tick(&state)
+        });
+    }
+
+    fn process_series_rescan_tick(
+        &self,
+        state: &Rc<RefCell<SeriesRescanState>>,
+    ) -> glib::ControlFlow {
+        let Some(id) = state.borrow_mut().queue.pop_front() else {
+            self.finish_series_rescan(state.borrow().tally.clone());
+            return glib::ControlFlow::Break;
+        };
+
+        let Some(db) = self.imp().db.get() else {
+            return glib::ControlFlow::Break;
+        };
+
+        if let Some((_, book_object)) = self.find_book(id) {
+            let old_book = book_object.book();
+            let canonical = library::scanner::canonicalize_path(&old_book.path);
+
+            match library::scanner::scan_epub(&canonical) {
+                Ok(scanned) => {
+                    if scanned.series != old_book.series
+                        || scanned.series_index != old_book.series_index
+                    {
+                        let mut updated = old_book.clone();
+                        updated.series = scanned.series;
+                        updated.series_index = scanned.series_index;
+
+                        if library::db::insert_book(&db.borrow(), &updated).is_ok() {
+                            book_object.set_book(updated);
+                            state.borrow_mut().tally.updated += 1;
+                        } else {
+                            state.borrow_mut().tally.failed += 1;
+                        }
+                    }
+                }
+                Err(err) => {
+                    library::log::log(&format!(
+                        "Couldn't rescan series for \u{201c}{}\u{201d}: {err}",
+                        old_book.title
+                    ));
+                    state.borrow_mut().tally.failed += 1;
+                }
+            }
+        }
+
+        let mut s = state.borrow_mut();
+        s.done += 1;
+        let (done, total) = (s.done, s.total);
+        drop(s);
+        self.update_progress_text("Rescanning series", done, total);
+
+        glib::ControlFlow::Continue
+    }
+
+    fn finish_series_rescan(&self, tally: SeriesRescanTally) {
+        let imp = self.imp();
+        imp.refreshing.set(false);
+        self.set_maintenance_active(MaintenanceOp::RescanSeries, false);
+
+        if tally.updated > 0 {
+            if let Some(store) = imp.store.get() {
+                let count = store.n_items();
+                store.items_changed(0, count, count);
+            }
+        }
+
+        let mut parts = Vec::new();
+        if tally.updated > 0 {
+            parts.push(format!("updated {}", tally.updated));
+        }
+        if tally.failed > 0 {
+            parts.push(format!("{} failed", tally.failed));
+        }
+        let message = if parts.is_empty() {
+            "No series changes found".to_string()
+        } else {
+            format!("Series rescan complete: {}", parts.join(", "))
+        };
+        library::log::log(&message);
+        self.show_toast(&message);
+    }
+
+    /// Refresh and Rescan Series share one "a background maintenance op is
+    /// running" state (`imp.refreshing`, the progress corner notification,
+    /// and each other's button being disabled) so only one can run at a
+    /// time — they both walk the same book list one idle tick at a time.
+    /// Only the button/spinner for the op that's actually running spins.
+    fn set_maintenance_active(&self, op: MaintenanceOp, active: bool) {
         let imp = self.imp();
         if let Some(button) = imp.refresh_button.get() {
             button.set_sensitive(!active);
         }
+        if let Some(button) = imp.rescan_button.get() {
+            button.set_sensitive(!active);
+        }
+
+        let refresh_on = active && op == MaintenanceOp::Refresh;
+        let rescan_on = active && op == MaintenanceOp::RescanSeries;
+
         if let Some(stack) = imp.refresh_stack.get() {
-            stack.set_visible_child_name(if active { "spinner" } else { "icon" });
+            stack.set_visible_child_name(if refresh_on { "spinner" } else { "icon" });
         }
         if let Some(spinner) = imp.refresh_spinner.get() {
-            spinner.set_spinning(active);
+            spinner.set_spinning(refresh_on);
         }
+        if let Some(stack) = imp.rescan_stack.get() {
+            stack.set_visible_child_name(if rescan_on { "spinner" } else { "icon" });
+        }
+        if let Some(spinner) = imp.rescan_spinner.get() {
+            spinner.set_spinning(rescan_on);
+        }
+
         if let Some(spinner) = imp.progress_spinner.get() {
             spinner.set_spinning(active);
         }
@@ -920,9 +1285,9 @@ impl GnosisWindow {
         }
     }
 
-    fn update_progress_text(&self, done: usize, total: usize) {
-        if let Some(label) = self.imp().progress_label.get() {
-            label.set_text(&format!("Refreshing library\u{2026} {done}/{total}"));
+    fn update_progress_text(&self, label: &str, done: usize, total: usize) {
+        if let Some(widget) = self.imp().progress_label.get() {
+            widget.set_text(&format!("{label}\u{2026} {done}/{total}"));
         }
     }
 
@@ -942,8 +1307,194 @@ impl GnosisWindow {
         stack.set_visible_child_name(page);
     }
 
-    fn show_reader_stub(&self, book: &library::Book) {
-        self.show_toast(&format!("Reader not implemented yet — {}", book.title));
+    pub(crate) fn open_reader(&self, book: &library::Book) {
+        let imp = self.imp();
+        let Some(reader) = imp.reader.get() else {
+            return;
+        };
+
+        *reader.current_book.borrow_mut() = Some(book.path.clone());
+        *imp.reader_book_id.borrow_mut() = Some(book.id);
+        reader.title_widget.set_title(&book.title);
+        reader.toc_menu.remove_all();
+
+        // The id in the path is just a cache-buster (see reader_scheme.rs) —
+        // without it, `fetch()` would keep serving the first book's cached
+        // bytes for every book opened afterward.
+        let uri = format!("{}:///book/{}", super::reader_scheme::SCHEME, book.id);
+        let script = super::reader::open_book_script(&uri, book.locator.as_deref());
+        reader
+            .web_view
+            .evaluate_javascript(&script, None, None, gio::Cancellable::NONE, |_| {});
+
+        if let Some(nav_view) = imp.nav_view.get() {
+            nav_view.push(&reader.page);
+        }
+    }
+
+    /// Called from the reader's `relocate` message: persists the resume
+    /// position for whichever book is currently open in the reader.
+    pub fn save_reader_position(&self, cfi: Option<String>, fraction: f64) {
+        let imp = self.imp();
+        let Some(id) = *imp.reader_book_id.borrow() else {
+            return;
+        };
+        let Some(db) = imp.db.get() else {
+            return;
+        };
+        if library::db::update_reader_position(&db.borrow(), id, cfi.as_deref(), fraction).is_err()
+        {
+            return;
+        }
+        if let Some((_, book_object)) = self.find_book(id) {
+            let mut book = book_object.book();
+            book.locator = cfi;
+            book.progress = fraction;
+            book_object.set_book(book);
+        }
+    }
+
+    pub fn show_reader_error(&self, message: &str) {
+        self.show_toast(&format!("Couldn't open book: {message}"));
+    }
+
+    /// Reconfigures the (single, reused) collection detail page for `name`
+    /// and pushes it — same "reconfigure then push" shape as `open_reader`.
+    fn open_collection(&self, kind: CollectionKind, name: &str) {
+        let imp = self.imp();
+        let Some(detail) = imp.collection_detail.get() else {
+            return;
+        };
+        let Some(db) = imp.db.get() else {
+            return;
+        };
+
+        let cover_path = library::db::all_collection_covers(&db.borrow(), kind.as_str())
+            .ok()
+            .and_then(|covers| covers.get(name).cloned())
+            .or_else(|| self.first_cover_for(kind, name));
+
+        detail.configure(kind, name, cover_path.as_deref());
+
+        if let Some(nav_view) = imp.nav_view.get() {
+            nav_view.push(&detail.page);
+        }
+    }
+
+    /// Cover fallback when no custom image is set: the first book in that
+    /// author's/series' collection that has one.
+    fn first_cover_for(&self, kind: CollectionKind, name: &str) -> Option<std::path::PathBuf> {
+        let store = self.imp().store.get()?;
+        for i in 0..store.n_items() {
+            let Some(book_object) = store.item(i).and_downcast::<BookObject>() else {
+                continue;
+            };
+            let book = book_object.book();
+            let matches = match kind {
+                CollectionKind::Author => book.author.as_deref() == Some(name),
+                CollectionKind::Series => book.series.as_deref() == Some(name),
+            };
+            if matches && book.cover_path.is_some() {
+                return book.cover_path;
+            }
+        }
+        None
+    }
+
+    fn pick_collection_cover(&self, kind: CollectionKind, name: String) {
+        let filter = gtk::FileFilter::new();
+        filter.add_pixbuf_formats();
+        filter.set_name(Some("Images"));
+        let filters = gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&filter);
+
+        let dialog = gtk::FileDialog::builder()
+            .title("Set Cover Image")
+            .modal(true)
+            .filters(&filters)
+            .build();
+
+        let window_weak = self.downgrade();
+        dialog.open(Some(self), gio::Cancellable::NONE, move |result| {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let Ok(file) = result else {
+                return;
+            };
+            let Some(path) = file.path() else {
+                return;
+            };
+            window.apply_collection_cover(kind, &name, &path);
+        });
+    }
+
+    fn apply_collection_cover(&self, kind: CollectionKind, name: &str, source: &std::path::Path) {
+        let Some(db) = self.imp().db.get() else {
+            return;
+        };
+
+        let dest_dir = library::db::collection_covers_dir();
+        if std::fs::create_dir_all(&dest_dir).is_err() {
+            self.show_toast("Couldn't save cover image");
+            return;
+        }
+        let extension = source.extension().and_then(|e| e.to_str()).unwrap_or("img");
+        let dest = dest_dir.join(format!("{}-{}.{extension}", kind.as_str(), Uuid::new_v4()));
+        if std::fs::copy(source, &dest).is_err() {
+            self.show_toast("Couldn't save cover image");
+            return;
+        }
+        if library::db::set_collection_cover(&db.borrow(), kind.as_str(), name, &dest).is_err() {
+            self.show_toast("Couldn't save cover image");
+            return;
+        }
+
+        self.rebuild_collections();
+        self.show_toast(&format!("Updated cover for \u{201c}{name}\u{201d}"));
+    }
+
+    fn remove_collection_cover(&self, kind: CollectionKind, name: &str) {
+        let Some(db) = self.imp().db.get() else {
+            return;
+        };
+        if library::db::remove_collection_cover(&db.borrow(), kind.as_str(), name).is_err() {
+            return;
+        }
+        self.rebuild_collections();
+        self.show_toast(&format!("Removed custom cover for \u{201c}{name}\u{201d}"));
+    }
+
+    /// Rebuilds the Authors/Series tile grids from `store` — grouping by
+    /// (case-insensitively deduped) author/series name, counting books, and
+    /// resolving each tile's cover image (explicit DB cover, else the first
+    /// book in that collection with one). Called whenever `store` changes.
+    fn rebuild_collections(&self) {
+        let imp = self.imp();
+        let (Some(store), Some(db)) = (imp.store.get(), imp.db.get()) else {
+            return;
+        };
+
+        let books: Vec<library::Book> = (0..store.n_items())
+            .filter_map(|i| store.item(i).and_downcast::<BookObject>())
+            .map(|object| object.book())
+            .collect();
+
+        for (kind, target_store) in [
+            (CollectionKind::Author, imp.authors_store.get()),
+            (CollectionKind::Series, imp.series_store.get()),
+        ] {
+            let Some(target_store) = target_store else {
+                continue;
+            };
+            let custom_covers =
+                library::db::all_collection_covers(&db.borrow(), kind.as_str()).unwrap_or_default();
+
+            target_store.remove_all();
+            for data in super::collection_object::group_books(&books, kind, &custom_covers) {
+                target_store.append(&CollectionObject::new(data));
+            }
+        }
     }
 
     fn show_toast(&self, message: &str) {
@@ -951,6 +1502,18 @@ impl GnosisWindow {
             overlay.add_toast(adw::Toast::new(message));
         }
     }
+}
+
+/// Unpacks a `win.*-collection-cover`/`win.open-collection` action's `(ss)`
+/// parameter into a `CollectionKind` and name.
+fn collection_kind_and_name(parameter: Option<&glib::Variant>) -> Option<(CollectionKind, String)> {
+    let (kind, name) = parameter?.get::<(String, String)>()?;
+    let kind = match kind.as_str() {
+        "author" => CollectionKind::Author,
+        "series" => CollectionKind::Series,
+        _ => return None,
+    };
+    Some((kind, name))
 }
 
 /// Compares two cached cover images by content, so a re-scan that produces
@@ -978,5 +1541,19 @@ struct RefreshTally {
     refreshed: usize,
     covers_updated: usize,
     removed: usize,
+    failed: usize,
+}
+
+/// The queue driving [`GnosisWindow::process_series_rescan_tick`].
+struct SeriesRescanState {
+    queue: std::collections::VecDeque<Uuid>,
+    total: usize,
+    done: usize,
+    tally: SeriesRescanTally,
+}
+
+#[derive(Clone, Default)]
+struct SeriesRescanTally {
+    updated: usize,
     failed: usize,
 }
