@@ -19,6 +19,9 @@ pub struct SettingsWidgets {
     pub refresh_button: gtk::Button,
     pub refresh_stack: gtk::Stack,
     pub refresh_spinner: gtk::Spinner,
+    pub rescan_button: gtk::Button,
+    pub rescan_stack: gtk::Stack,
+    pub rescan_spinner: gtk::Spinner,
 }
 
 /// Builds the Settings page (library folders, maintenance actions, and an
@@ -63,6 +66,37 @@ pub fn build_page(parent: &GnosisWindow) -> SettingsWidgets {
     refresh_row.add_suffix(&refresh_button);
     refresh_row.set_activatable_widget(Some(&refresh_button));
     maintenance_group.add(&refresh_row);
+
+    // Distinct from "Refresh All Metadata" above: that intentionally leaves
+    // series/book-number untouched (so it never clobbers a manual edit) —
+    // this exists specifically to backfill series/series_index for books
+    // added before series parsing worked, without touching reading
+    // progress, title, author, or covers.
+    let rescan_row = adw::ActionRow::builder()
+        .title("Rescan Series &amp; Book Numbers")
+        .subtitle(
+            "Re-reads series name and book number from every book's file. Leaves reading \
+             progress, title, author, and covers untouched.",
+        )
+        .build();
+    let rescan_icon = gtk::Image::from_icon_name("view-refresh-symbolic");
+    let rescan_spinner = gtk::Spinner::new();
+    let rescan_stack = gtk::Stack::new();
+    rescan_stack.add_named(&rescan_icon, Some("icon"));
+    rescan_stack.add_named(&rescan_spinner, Some("spinner"));
+    rescan_stack.set_visible_child_name("icon");
+
+    let rescan_button = gtk::Button::builder().child(&rescan_stack).build();
+    rescan_button.add_css_class("flat");
+    rescan_button.set_valign(gtk::Align::Center);
+    rescan_button.set_tooltip_text(Some("Rescan Series & Book Numbers"));
+    let parent_for_rescan = parent.clone();
+    rescan_button.connect_clicked(move |_| {
+        parent_for_rescan.rescan_series();
+    });
+    rescan_row.add_suffix(&rescan_button);
+    rescan_row.set_activatable_widget(Some(&rescan_button));
+    maintenance_group.add(&rescan_row);
 
     let log_group = adw::PreferencesGroup::builder()
         .title("Activity Log")
@@ -156,6 +190,9 @@ pub fn build_page(parent: &GnosisWindow) -> SettingsWidgets {
         refresh_button,
         refresh_stack,
         refresh_spinner,
+        rescan_button,
+        rescan_stack,
+        rescan_spinner,
     }
 }
 
