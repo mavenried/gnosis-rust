@@ -11,9 +11,6 @@ use super::book_object::BookObject;
 use super::collection_object::CollectionKind;
 use super::window::GnosisWindow;
 
-/// A single reusable "one author/series" page: built once in `setup_ui` and
-/// reconfigured + pushed each time a tile is opened (`configure`), the same
-/// build-once-reuse shape `ui/reader.rs` uses for its `WebView`.
 pub struct CollectionDetailWidgets {
     pub page: adw::NavigationPage,
     title_widget: adw::WindowTitle,
@@ -44,15 +41,6 @@ impl CollectionDetailWidgets {
     }
 }
 
-/// Loads `path`, scales it to fill a `size`x`size` square, and crops to
-/// exactly that square — used instead of `Picture::set_file` +
-/// `ContentFit::Cover` because outside a `GridView` cell (which forcibly
-/// caps its item's allocation regardless), `GtkPicture`'s natural size
-/// negotiation is driven by the source image's own resolution rather than
-/// `width_request`/`height_request`, letting a large cover balloon and
-/// starve its sibling widgets of space. Baking the crop into the pixels
-/// themselves sidesteps that entirely: the resulting texture's intrinsic
-/// size genuinely *is* `size`x`size`, so there's nothing left to negotiate.
 fn square_cover_texture(path: &Path, size: i32) -> Option<gdk::Texture> {
     let pixbuf = gdk_pixbuf::Pixbuf::from_file(path).ok()?;
     let (width, height) = (pixbuf.width(), pixbuf.height());
@@ -106,7 +94,6 @@ pub fn build(store: &gio::ListStore, parent: &GnosisWindow) -> CollectionDetailW
             };
             let (kind, _) = &*state.borrow();
             let ordering = match kind {
-                // A series' natural order is by book number, not title.
                 CollectionKind::Series => a
                     .series_index
                     .partial_cmp(&b.series_index)
@@ -150,11 +137,6 @@ pub fn build(store: &gio::ListStore, parent: &GnosisWindow) -> CollectionDetailW
         .child(&grid_view)
         .build();
 
-    // The paintable set in `configure` (via `square_cover_texture`) is
-    // always exactly COVER_SIZE×COVER_SIZE, so there's no source-resolution
-    // ambiguity left for GtkPicture's size negotiation to get wrong here —
-    // see `square_cover_texture`'s doc comment for why that matters outside
-    // a GridView cell.
     let cover = gtk::Picture::builder()
         .width_request(COVER_SIZE)
         .height_request(COVER_SIZE)
@@ -171,14 +153,6 @@ pub fn build(store: &gio::ListStore, parent: &GnosisWindow) -> CollectionDetailW
     let header_bar = adw::HeaderBar::new();
     header_bar.set_title_widget(Some(&title_widget));
 
-    // A second top bar for the cover, rather than making it a sibling of
-    // `scrolled` inside a hand-rolled vertical Box: every other page in
-    // this app hands `ToolbarView::set_content` a single widget that's
-    // either the scrollable content itself or a Stack containing it — none
-    // of them split space between a fixed element and an expanding one via
-    // a plain Box, and ToolbarView's *own* top/bottom bar mechanism already
-    // does exactly that (reserve compact space per bar, give the rest to
-    // `content`) reliably, since it's what every other page relies on.
     let cover_bar = gtk::CenterBox::new();
     cover_bar.set_center_widget(Some(&cover));
     cover_bar.set_margin_top(12);

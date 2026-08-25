@@ -7,11 +7,6 @@ use crate::library::ReadingStatus;
 
 use super::book_object::BookObject;
 
-/// Builds the library sidebar: a Status section that filters the main book
-/// grid (wired into `filters`, a `gtk::EveryFilter` also holding the search
-/// filter — see `ui/window.rs`), and a Browse section that switches
-/// `view_stack` to the Authors/Series tile grids (music-player-style
-/// destinations, not filters — see `ui/collection_card.rs`).
 pub fn build(filters: &gtk::EveryFilter, view_stack: &gtk::Stack) -> gtk::Widget {
     let status_state: Rc<RefCell<Option<ReadingStatus>>> = Rc::new(RefCell::new(None));
     let status_list = gtk::ListBox::builder()
@@ -46,8 +41,6 @@ pub fn build(filters: &gtk::EveryFilter, view_stack: &gtk::Stack) -> gtk::Widget
             _ => None,
         };
         status_filter_for_signal.changed(gtk::FilterChange::Different);
-        // Picking a status implies "show me books" — switch back from the
-        // Authors/Series tile grids if one of those is currently showing.
         view_stack_for_status.set_visible_child_name("books");
     });
 

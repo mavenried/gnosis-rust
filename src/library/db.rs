@@ -47,9 +47,6 @@ pub fn init_db() -> Result<Connection> {
     )
     .context("creating books table")?;
 
-    // `locator` was added after the table above shipped; existing databases
-    // won't have it yet. Best-effort: ignore the error when it already
-    // exists (SQLite has no `ADD COLUMN IF NOT EXISTS`).
     conn.execute("ALTER TABLE books ADD COLUMN locator TEXT", [])
         .ok();
 
@@ -128,9 +125,6 @@ pub fn delete_book(conn: &Connection, id: Uuid) -> Result<()> {
     Ok(())
 }
 
-/// Persists the reader's resume position: `locator` is an opaque EPUB CFI
-/// string from foliate-js, `progress` a coarse 0.0–1.0 fraction through the
-/// book.
 pub fn update_reader_position(
     conn: &Connection,
     id: Uuid,
@@ -154,8 +148,6 @@ pub fn book_exists_at(conn: &Connection, path: &Path) -> Result<bool> {
     Ok(count > 0)
 }
 
-/// Persists a user-chosen cover image for an author or series tile (see
-/// `ui/collection_card.rs`'s "Set Cover Image…" context menu entry).
 pub fn set_collection_cover(conn: &Connection, kind: &str, name: &str, cover_path: &Path) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO collection_covers (kind, name, cover_path) VALUES (?1, ?2, ?3)",
@@ -174,8 +166,6 @@ pub fn remove_collection_cover(conn: &Connection, kind: &str, name: &str) -> Res
     Ok(())
 }
 
-/// One bulk query for every custom cover of a given kind ("author"/"series"),
-/// keyed by name — used when building a whole tile grid at once.
 pub fn all_collection_covers(conn: &Connection, kind: &str) -> Result<HashMap<String, PathBuf>> {
     let mut stmt =
         conn.prepare("SELECT name, cover_path FROM collection_covers WHERE kind = ?1")?;

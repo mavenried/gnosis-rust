@@ -15,14 +15,9 @@ pub struct Book {
     pub cover_path: Option<PathBuf>,
     pub added_at: i64,
     pub progress: f64,
-    /// The reader's resume position: an EPUB CFI string from foliate-js.
-    /// Opaque to Rust — only ever round-tripped through the reader.
     pub locator: Option<String>,
 }
 
-/// A book's finished-ness. There's no stored "mark as read" flag — this is
-/// derived from `progress`/`locator` so the library can be filtered by
-/// status without any extra tracking UI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadingStatus {
     Unread,
@@ -30,8 +25,6 @@ pub enum ReadingStatus {
     Read,
 }
 
-/// Reflowable EPUBs rarely hit exactly 100% (footnotes, back matter), so
-/// "read" is a high-but-not-total threshold, same as most reading apps use.
 const READ_THRESHOLD: f64 = 0.97;
 
 impl Book {

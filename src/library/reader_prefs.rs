@@ -5,10 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use super::db::data_dir;
 
-/// The reader's display preferences (theme, font, size) — remembered across
-/// books and app restarts, since re-picking them every session would be
-/// annoying. Deliberately separate from the reading-position/library data
-/// in SQLite: this is pure UI preference, not library content.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReaderPrefs {
     pub theme: String,

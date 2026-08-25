@@ -29,12 +29,6 @@ pub struct CollectionData {
     pub book_count: u32,
 }
 
-/// Groups `books` by author or series (case-insensitively deduped — first-
-/// seen casing wins for display), counting books per group and resolving
-/// each group's cover image: an explicit `custom_covers` entry (keyed by
-/// the display name — see `library::db::all_collection_covers`), else the
-/// first book in that group with a cover. Results are sorted by display
-/// name, case-insensitive.
 pub fn group_books(
     books: &[Book],
     kind: CollectionKind,

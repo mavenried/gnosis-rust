@@ -10,9 +10,6 @@ use super::window::GnosisWindow;
 
 type Rows = Rc<RefCell<Vec<adw::ActionRow>>>;
 
-/// Widgets from the Settings page that the window needs to reach into
-/// directly: to refresh the log view when the page is shown, and to drive
-/// the refresh button's icon/spinner while a refresh is running.
 pub struct SettingsWidgets {
     pub page: adw::NavigationPage,
     pub log_view: gtk::TextView,
@@ -24,8 +21,6 @@ pub struct SettingsWidgets {
     pub rescan_spinner: gtk::Spinner,
 }
 
-/// Builds the Settings page (library folders, maintenance actions, and an
-/// activity log) as a page pushed onto the main window's navigation stack.
 pub fn build_page(parent: &GnosisWindow) -> SettingsWidgets {
     let folders_group = adw::PreferencesGroup::builder()
         .title("Library Folders")
@@ -67,11 +62,6 @@ pub fn build_page(parent: &GnosisWindow) -> SettingsWidgets {
     refresh_row.set_activatable_widget(Some(&refresh_button));
     maintenance_group.add(&refresh_row);
 
-    // Distinct from "Refresh All Metadata" above: that intentionally leaves
-    // series/book-number untouched (so it never clobbers a manual edit) —
-    // this exists specifically to backfill series/series_index for books
-    // added before series parsing worked, without touching reading
-    // progress, title, author, or covers.
     let rescan_row = adw::ActionRow::builder()
         .title("Rescan Series &amp; Book Numbers")
         .subtitle(

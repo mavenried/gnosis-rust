@@ -7,7 +7,6 @@ fn settings_file() -> PathBuf {
     data_dir().join("library_folders.txt")
 }
 
-/// Folders that Gnosis scans for EPUB books, as configured in Preferences.
 pub fn list_folders() -> Vec<PathBuf> {
     let Ok(contents) = fs::read_to_string(settings_file()) else {
         return Vec::new();

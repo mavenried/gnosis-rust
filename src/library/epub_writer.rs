@@ -17,9 +17,6 @@ pub struct MetadataUpdate<'a> {
     pub series_index: Option<f64>,
 }
 
-/// Writes a copy of `source` with `update` baked into its OPF metadata,
-/// placed alongside the original file, which is left untouched. Returns the
-/// new file's path.
 pub fn write_copy_with_metadata(source: &Path, update: &MetadataUpdate) -> Result<PathBuf> {
     let (opf_zip_name, new_opf) = updated_opf(source, update)?;
     let dest = destination_path(source);
@@ -27,10 +24,6 @@ pub fn write_copy_with_metadata(source: &Path, update: &MetadataUpdate) -> Resul
     Ok(dest)
 }
 
-/// Overwrites `source` in place with `update` baked into its OPF metadata.
-/// Writes to a temporary file alongside `source` first and only replaces it
-/// with an atomic rename once the rewrite has fully succeeded, so a failure
-/// partway through never leaves `source` corrupted.
 pub fn write_metadata_in_place(source: &Path, update: &MetadataUpdate) -> Result<()> {
     let (opf_zip_name, new_opf) = updated_opf(source, update)?;
 
@@ -52,8 +45,6 @@ pub fn write_metadata_in_place(source: &Path, update: &MetadataUpdate) -> Result
     }
 }
 
-/// Reads `source`'s OPF file and returns `(zip entry name, rewritten OPF
-/// bytes)` with `update` applied.
 fn updated_opf(source: &Path, update: &MetadataUpdate) -> Result<(String, Vec<u8>)> {
     let mut doc = EpubDoc::new(source)
         .map_err(|e| anyhow!("{e}"))
@@ -91,8 +82,6 @@ fn destination_path(source: &Path) -> PathBuf {
     candidate
 }
 
-/// Copies every entry of the `source` zip archive into `dest` unchanged,
-/// except for `replace_name`, whose contents become `replacement`.
 fn copy_zip_with_replacement(
     source: &Path,
     dest: &Path,
@@ -161,9 +150,6 @@ fn metadata_bounds(events: &[Event<'static>]) -> Option<(usize, usize)> {
     Some((start, start + end))
 }
 
-/// Sets the text content of the first `<dc:{local_name}>` element inside
-/// `<metadata>`, inserting a new element before `</metadata>` if none exists.
-/// Does nothing if `value` is `None`.
 fn set_text_element(events: &mut Vec<Event<'static>>, local_name: &str, value: Option<&str>) {
     let Some(value) = value else { return };
     let Some((meta_start, meta_end)) = metadata_bounds(events) else {
@@ -194,9 +180,6 @@ fn set_text_element(events: &mut Vec<Event<'static>>, local_name: &str, value: O
     }
 }
 
-/// Sets `<meta name="{meta_name}" content="{value}"/>` inside `<metadata>`,
-/// inserting it before `</metadata>` if it doesn't already exist. Does
-/// nothing if `value` is `None`.
 fn set_meta_tag(events: &mut Vec<Event<'static>>, meta_name: &str, value: Option<&str>) {
     let Some(value) = value else { return };
     let Some((meta_start, meta_end)) = metadata_bounds(events) else {
