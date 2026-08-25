@@ -5,25 +5,6 @@ use std::rc::Rc;
 use gtk::{gio, glib};
 use soup::prelude::*;
 
-/// The `gnosis-reader:` scheme this module registers, serving two things:
-///
-/// - `gnosis-reader:///shell/...` — the bundled reader UI (`reader.html`,
-///   `reader.js`, and the vendored `foliate-js/` modules), embedded into the
-///   binary at compile time so the app doesn't depend on the source tree's
-///   layout at runtime.
-/// - `gnosis-reader:///book/<id>` — the currently-open book's raw file
-///   bytes, streamed straight from disk. foliate-js's own `fetch()` +
-///   bundled zip reader do the unzipping; nothing here parses the EPUB.
-///   `<id>` is only there so each book gets a distinct URL — `fetch()`
-///   caches by URL, so reusing one fixed URL for every book would keep
-///   serving the first book's cached bytes forever; the actual bytes always
-///   come from `current_book`, not from anything encoded in `<id>`.
-///   Honors `Range` request headers (serving `206 Partial Content`): a
-///   multi-hundred-MB/GB EPUB (large fixed-layout comics in particular) is
-///   otherwise pulled into a single in-memory `Blob` before any zip parsing
-///   can even start (see `reader.js`'s `openBookOverRange`, which drives
-///   zip.js with a custom range-request-based reader instead of a
-///   whole-file fetch — specifically so this matters).
 pub const SCHEME: &str = "gnosis-reader";
 
 macro_rules! asset {
@@ -62,9 +43,6 @@ fn mime_for(path: &str) -> &'static str {
     }
 }
 
-/// Registers the scheme on `context`. `current_book` is shared with the
-/// reader page: it sets the path before opening a book, and this handler
-/// reads it back on each request to `/book/current`.
 pub fn register(context: &webkit6::WebContext, current_book: Rc<RefCell<Option<PathBuf>>>) {
     context.register_uri_scheme(SCHEME, move |request| {
         let path = request.path().map(|p| p.to_string()).unwrap_or_default();
@@ -101,15 +79,6 @@ pub fn register(context: &webkit6::WebContext, current_book: Rc<RefCell<Option<P
             let headers = soup::MessageHeaders::new(soup::MessageHeadersType::Response);
             headers.append("Accept-Ranges", "bytes");
 
-            // A `finish_with_response` stream is read to its own real EOF
-            // regardless of the `stream_length` passed to
-            // `URISchemeResponse::new` — WebKit doesn't truncate a live,
-            // merely-seeked file stream at that length for custom schemes,
-            // so a Range request would otherwise still get everything from
-            // `start` through the true end of the file. Reading exactly the
-            // requested slice into memory first (same idiom already used
-            // for the `/shell/` assets below) sidesteps that: a
-            // `MemoryInputStream` genuinely EOFs where the buffer ends.
             let response = match range {
                 Some((start, end)) => {
                     let length = (end - start + 1) as usize;
@@ -143,11 +112,6 @@ pub fn register(context: &webkit6::WebContext, current_book: Rc<RefCell<Option<P
     });
 }
 
-/// Parses an HTTP `Range` request header (`bytes=start-end`, `bytes=start-`,
-/// or the suffix form `bytes=-N`) into an inclusive `(start, end)` byte
-/// range. Only the first range of a multi-range request is honored (zip
-/// readers only ever ask for one at a time); anything unparseable or out of
-/// bounds falls back to `None` (a full, non-partial response).
 fn parse_range(value: &str, file_size: i64) -> Option<(i64, i64)> {
     let spec = value.strip_prefix("bytes=")?;
     let spec = spec.split(',').next()?.trim();

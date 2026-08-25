@@ -18,9 +18,6 @@ pub struct ReaderWidgets {
     pub web_view: webkit6::WebView,
     pub title_widget: adw::WindowTitle,
     pub toc_menu: gio::Menu,
-    /// Shared with the `gnosis-reader:` scheme handler: the path it streams
-    /// bytes from for `gnosis-reader:///book/current`. Set before asking the
-    /// page to open a book.
     pub current_book: Rc<RefCell<Option<PathBuf>>>,
 }
 
@@ -32,9 +29,12 @@ enum ReaderMessage {
         #[serde(default)]
         toc: Vec<TocEntry>,
     },
+    #[serde(rename_all = "camelCase")]
     Relocate {
         cfi: Option<String>,
         fraction: Option<f64>,
+        location_current: Option<i64>,
+        location_total: Option<i64>,
     },
     Error {
         message: String,
@@ -48,9 +48,6 @@ struct TocEntry {
     depth: u32,
 }
 
-/// Builds the reading view once: one `WebView` + its own `AdwNavigationPage`
-/// (tag `"reader"`), reused for every book that gets opened afterward rather
-/// than rebuilt (a WebView spins up its own web process, which isn't cheap).
 pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
     let current_book: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
 
@@ -67,17 +64,6 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
         .hexpand(true)
         .build();
 
-    // Restore the last-used theme/font/size (see build_display_settings())
-    // once the shell page has actually finished loading, so the very first
-    // book opened this session already renders with them rather than
-    // defaults. Injecting this in the same tick as `load_uri` below (as a
-    // "poll until window.gnosisSetStyle exists" script, like every other
-    // evaluate_javascript call in this file) doesn't work here specifically:
-    // unlike those other calls — always made long after the shell has
-    // already loaded — this one runs before navigation to reader.html even
-    // starts, so it targets the pre-navigation context; that context (and
-    // its pending poll) is torn down when the real page loads, and the
-    // restore silently never happens even though it looks like it should.
     let saved_prefs = library::reader_prefs::load();
     let web_view_for_restore = web_view.clone();
     let restore_script = initial_style_script(&saved_prefs);
@@ -104,12 +90,20 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
 
     let display_button = build_display_settings(&web_view, &saved_prefs);
 
-    // foliate-js's paginator has no built-in page-turn triggers of its own
-    // (confirmed by reading paginator.js — it only tracks touch/pointer
-    // selection) — the app embedding it is expected to supply navigation,
-    // same as the real Foliate app does. These buttons and the keyboard
-    // handler below call the `gnosisPrev`/`gnosisNext` functions exposed by
-    // assets/reader.js.
+    let clock_label = gtk::Label::builder()
+        .css_classes(["caption", "dim-label"])
+        .build();
+    update_clock(&clock_label);
+    let clock_label_for_timer = clock_label.clone();
+    glib::timeout_add_seconds_local(30, move || {
+        update_clock(&clock_label_for_timer);
+        glib::ControlFlow::Continue
+    });
+
+    let progress_label = gtk::Label::builder()
+        .css_classes(["caption", "dim-label"])
+        .build();
+
     let prev_button = gtk::Button::from_icon_name("go-previous-symbolic");
     prev_button.set_tooltip_text(Some("Previous Page"));
     let next_button = gtk::Button::from_icon_name("go-next-symbolic");
@@ -170,16 +164,29 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
     header_bar.pack_start(&next_button);
     header_bar.pack_end(&toc_button);
     header_bar.pack_end(&display_button);
+    header_bar.pack_end(&clock_label);
+
+    let footer_bar = gtk::CenterBox::new();
+    footer_bar.set_center_widget(Some(&progress_label));
+    footer_bar.set_margin_top(4);
+    footer_bar.set_margin_bottom(4);
 
     let toolbar_view = adw::ToolbarView::new();
     toolbar_view.add_top_bar(&header_bar);
+    toolbar_view.add_bottom_bar(&footer_bar);
     toolbar_view.set_content(Some(&web_view));
 
     let page = adw::NavigationPage::with_tag(&toolbar_view, "Reader", "reader");
 
+    let web_view_for_shown = web_view.clone();
+    page.connect_shown(move |_| {
+        web_view_for_shown.grab_focus();
+    });
+
     let parent_weak = parent.downgrade();
     let title_widget_for_msg = title_widget.clone();
     let toc_menu_for_msg = toc_menu.clone();
+    let progress_label_for_msg = progress_label.clone();
     content_manager.connect_script_message_received(Some("gnosis"), move |_, value| {
         let Some(parent) = parent_weak.upgrade() else {
             return;
@@ -192,6 +199,7 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
                 if let Some(title) = title {
                     title_widget_for_msg.set_title(&title);
                 }
+                progress_label_for_msg.set_label("");
                 toc_menu_for_msg.remove_all();
                 for entry in toc {
                     let indent = "\u{2003}".repeat(entry.depth as usize);
@@ -202,7 +210,17 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
                     );
                 }
             }
-            ReaderMessage::Relocate { cfi, fraction } => {
+            ReaderMessage::Relocate {
+                cfi,
+                fraction,
+                location_current,
+                location_total,
+            } => {
+                progress_label_for_msg.set_label(&progress_text(
+                    fraction,
+                    location_current,
+                    location_total,
+                ));
                 parent.save_reader_position(cfi, fraction.unwrap_or(0.0));
             }
             ReaderMessage::Error { message } => {
@@ -222,12 +240,6 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
 
 const THEME_NAMES: [&str; 4] = ["light", "sepia", "gray", "dark"];
 
-/// Builds the "Reading Preferences" menu button: a theme picker, a system
-/// font picker (family only — size is handled separately below, since
-/// point sizes don't map cleanly onto a reflowable page), and a font-size
-/// percentage. Selecting any of them pushes the combined choice to the
-/// reader shell via `window.gnosisSetStyle` and saves it as the new default
-/// for next time (see `library::reader_prefs`).
 fn build_display_settings(web_view: &webkit6::WebView, prefs: &ReaderPrefs) -> gtk::MenuButton {
     let theme_index = THEME_NAMES
         .iter()
@@ -240,10 +252,6 @@ fn build_display_settings(web_view: &webkit6::WebView, prefs: &ReaderPrefs) -> g
     let font_button = gtk::FontDialogButton::new(Some(font_dialog));
     font_button.set_level(gtk::FontLevel::Family);
 
-    // GtkFontDialogButton has no "unset" once a font_desc is set, so "use
-    // the publisher's own embedded font" (font_family: null) needs its own
-    // explicit control rather than relying on the button's default empty
-    // state — otherwise there'd be no way back to it after picking a font.
     let publisher_font_check = gtk::CheckButton::builder()
         .label("Publisher Font")
         .active(prefs.font_family.is_none())
@@ -257,12 +265,6 @@ fn build_display_settings(web_view: &webkit6::WebView, prefs: &ReaderPrefs) -> g
         gtk::Adjustment::new(prefs.font_size as f64, 50.0, 300.0, 10.0, 10.0, 0.0);
     let font_size_spin = gtk::SpinButton::new(Some(&font_size_adjustment), 1.0, 0);
 
-    // Where a book with no saved position opens: at its true first page
-    // (off, the default — the print-book convention) or skipping straight
-    // to the body text past any cover/title/copyright pages (on). Only
-    // affects future opens; a saved position always takes precedence. This
-    // one is session-only (not saved to ReaderPrefs) since it's about
-    // navigation behavior, not display.
     let skip_front_matter_switch = gtk::Switch::builder()
         .valign(gtk::Align::Center)
         .halign(gtk::Align::Start)
@@ -337,10 +339,6 @@ fn build_display_settings(web_view: &webkit6::WebView, prefs: &ReaderPrefs) -> g
     let publisher_font_for_font = publisher_font_check.clone();
     let font_size_for_font = font_size_spin.clone();
     font_button.connect_font_desc_notify(move |button| {
-        // Picking a font implies "not the publisher's font" — but only act
-        // on this if the button is actually the one the user can interact
-        // with (it's insensitive, and notify won't normally fire, while
-        // "Publisher Font" is checked; this is just a safety net).
         publisher_font_for_font.set_active(false);
         push_reader_style(
             &web_view_for_font,
@@ -380,8 +378,6 @@ fn build_display_settings(web_view: &webkit6::WebView, prefs: &ReaderPrefs) -> g
     display_button
 }
 
-/// Reads the four reading-preference widgets, pushes the combined style to
-/// the reader shell, and persists it as the new default for next time.
 fn push_reader_style(
     web_view: &webkit6::WebView,
     theme_dropdown: &gtk::DropDown,
@@ -417,10 +413,6 @@ fn push_reader_style(
     web_view.evaluate_javascript(&script, None, None, gio::Cancellable::NONE, |_| {});
 }
 
-/// Same JSON shape `push_reader_style` sends, but for restoring the saved
-/// preferences right after the reader shell first loads — waits for
-/// `window.gnosisSetStyle` to exist, same as `open_book_script` waits for
-/// `gnosisOpenBook`.
 fn initial_style_script(prefs: &ReaderPrefs) -> String {
     let style = serde_json::json!({
         "theme": prefs.theme,
@@ -435,10 +427,6 @@ fn initial_style_script(prefs: &ReaderPrefs) -> String {
     )
 }
 
-/// A script that waits for the reader shell's module script to finish
-/// loading (`window.gnosisOpenBook` only exists once it has) before opening
-/// the book — avoids racing the shell's own load against the first book a
-/// user opens.
 pub fn open_book_script(uri: &str, resume_cfi: Option<&str>) -> String {
     let uri_json = serde_json::to_string(uri).unwrap_or_else(|_| "\"\"".to_string());
     let cfi_json = resume_cfi
@@ -465,4 +453,26 @@ fn next_script() -> &'static str {
     "if (window.gnosisNext) window.gnosisNext();"
 }
 
+fn update_clock(label: &gtk::Label) {
+    let text = glib::DateTime::now_local()
+        .and_then(|now| now.format("%H:%M"))
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    label.set_label(&text);
+}
+
+fn progress_text(
+    fraction: Option<f64>,
+    location_current: Option<i64>,
+    location_total: Option<i64>,
+) -> String {
+    let mut parts = Vec::new();
+    if let (Some(current), Some(total)) = (location_current, location_total) {
+        parts.push(format!("Location {} of {total}", current + 1));
+    }
+    if let Some(fraction) = fraction {
+        parts.push(format!("{}%", (fraction * 100.0).round() as i64));
+    }
+    parts.join(" \u{b7} ")
+}
 
