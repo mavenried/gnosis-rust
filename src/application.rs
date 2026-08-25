@@ -31,11 +31,23 @@ mod imp {
         fn startup(&self) {
             self.parent_startup();
 
+            let css = gtk::CssProvider::new();
+            css.load_from_string(".gnosis-card-title { font-size: 0.85em; }");
+            if let Some(display) = gtk::gdk::Display::default() {
+                gtk::style_context_add_provider_for_display(
+                    &display,
+                    &css,
+                    gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+                );
+            }
+
+            let t0 = std::time::Instant::now();
             match library::db::init_db() {
                 Ok(conn) => {
+                    tracing::info!(elapsed = ?t0.elapsed(), "database opened");
                     self.db.set(Rc::new(RefCell::new(conn))).ok();
                 }
-                Err(err) => eprintln!("failed to open library database: {err}"),
+                Err(err) => tracing::error!("failed to open library database: {err}"),
             }
         }
 
@@ -48,12 +60,20 @@ mod imp {
                 return;
             }
 
+            let t0 = std::time::Instant::now();
             let window = GnosisWindow::new(&app);
+            tracing::debug!(elapsed = ?t0.elapsed(), "window constructed");
+
             if let Some(db) = self.db.get() {
+                let t1 = std::time::Instant::now();
                 window.set_database(db.clone());
-                window.scan_library_folders();
+                tracing::info!(elapsed = ?t1.elapsed(), "library loaded into UI");
             }
+
             window.present();
+            tracing::info!(elapsed = ?t0.elapsed(), "window shown");
+
+            window.scan_library_folders();
         }
     }
 

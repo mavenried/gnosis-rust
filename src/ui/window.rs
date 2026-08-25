@@ -17,22 +17,16 @@ use super::book_object::BookObject;
 use super::collection_card;
 use super::collection_object::{CollectionKind, CollectionObject};
 
-/// Which background library-maintenance operation is running — see
-/// `GnosisWindow::set_maintenance_active`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MaintenanceOp {
     Refresh,
     RescanSeries,
 }
 
-/// How an "Edit Metadata" save should affect the underlying EPUB file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriteBackMode {
-    /// Only update Gnosis's own library database.
     None,
-    /// Write a new EPUB file alongside the original, which is left untouched.
     Copy,
-    /// Overwrite the original EPUB file in place.
     InPlace,
 }
 
@@ -103,8 +97,6 @@ impl GnosisWindow {
         glib::Object::builder().property("application", app).build()
     }
 
-    /// Attaches the library database and populates the shelf from it.
-    /// Must be called once, right after construction.
     pub fn set_database(&self, db: Rc<RefCell<Connection>>) {
         let books = match library::db::list_books(&db.borrow()) {
             Ok(books) => books,
@@ -115,14 +107,10 @@ impl GnosisWindow {
         };
 
         let imp = self.imp();
-        // Set before appending: appending fires `items_changed`, which
-        // triggers `rebuild_collections`, which needs the database to read
-        // custom collection covers.
         imp.db.set(db).ok();
         let store = imp.store.get().expect("store built in constructed()");
-        for book in books {
-            store.append(&BookObject::new(book));
-        }
+        let book_objects: Vec<BookObject> = books.into_iter().map(BookObject::new).collect();
+        store.splice(0, 0, &book_objects);
 
         self.update_empty_state();
     }
@@ -155,19 +143,15 @@ impl GnosisWindow {
                     .contains(&query)
         });
 
-        // The sidebar (Status) appends its own filter onto this —
-        // every_filter AND-combines all of them.
         let every_filter = gtk::EveryFilter::new();
         every_filter.append(search_filter.clone());
-        // Populated with "books"/"authors"/"series" children below, once
-        // they're built; the sidebar's Browse rows just switch its visible
-        // child, so it only needs to exist (not be populated yet) here.
         let library_view_stack = gtk::Stack::new();
         let sidebar_widget = super::library_sidebar::build(&every_filter, &library_view_stack);
 
         let filter_model = gtk::FilterListModel::new(Some(store.clone()), Some(every_filter));
 
-        *imp.sort_key.borrow_mut() = "title".to_string();
+        let initial_sort_key = library::library_prefs::load().sort_key;
+        *imp.sort_key.borrow_mut() = initial_sort_key.clone();
         let sort_key = imp.sort_key.clone();
         let sorter = gtk::CustomSorter::new(move |a, b| {
             let (Some(a), Some(b)) = (
@@ -189,8 +173,6 @@ impl GnosisWindow {
                 "series" => {
                     let a_has_series = a.series.is_some();
                     let b_has_series = b.series.is_some();
-                    // Standalone books (no series) sort after every named
-                    // series, grouped together at the end.
                     a_has_series
                         .cmp(&b_has_series)
                         .reverse()
@@ -223,9 +205,6 @@ impl GnosisWindow {
 
         let grid_view = gtk::GridView::new(Some(selection_model), Some(book_card::factory()));
         grid_view.set_single_click_activate(false);
-        // GtkGridView caps at 7 columns by default and stretches them to fill
-        // the width, which balloons cover cards on wide windows. Raise the
-        // cap so it keeps adding columns near the cards' natural size instead.
         grid_view.set_min_columns(2);
         grid_view.set_max_columns(64);
 
@@ -267,9 +246,6 @@ impl GnosisWindow {
         stack.add_named(&empty_page, Some("empty"));
         stack.add_named(&scrolled, Some("library"));
 
-        // Authors/Series tile grids (music-player-style browsable
-        // destinations, not filters — see collection_card.rs). Populated by
-        // `rebuild_collections`, called whenever `store` changes.
         let authors_store = gio::ListStore::new::<CollectionObject>();
         let series_store = gio::ListStore::new::<CollectionObject>();
 
@@ -374,7 +350,7 @@ impl GnosisWindow {
         let sort_action = gio::SimpleAction::new_stateful(
             "sort-by",
             Some(glib::VariantTy::STRING),
-            &"title".to_variant(),
+            &initial_sort_key.to_variant(),
         );
         let sort_key_slot = imp.sort_key.clone();
         sort_action.connect_activate(move |action, parameter| {
@@ -384,6 +360,9 @@ impl GnosisWindow {
             *sort_key_slot.borrow_mut() = key.to_string();
             action.set_state(&key.to_variant());
             sorter.changed(gtk::SorterChange::Different);
+            library::library_prefs::save(&library::library_prefs::LibraryPrefs {
+                sort_key: key.to_string(),
+            });
         });
         self.add_action(&sort_action);
 
@@ -423,8 +402,6 @@ impl GnosisWindow {
         let nav_view = adw::NavigationView::new();
         nav_view.push(&library_page);
 
-        // A small corner notification showing background-refresh progress,
-        // separate from the (bottom-center, fire-and-forget) toast overlay.
         let progress_spinner = gtk::Spinner::new();
         let progress_label = gtk::Label::new(None);
         let progress_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -470,10 +447,6 @@ impl GnosisWindow {
 
         self.setup_actions();
 
-        // `/` or Ctrl+F focuses search; Ctrl+R refreshes the library. Neither
-        // fires while a text field already has focus (typing "/" should type
-        // a slash, not jump focus), and grid items no longer grab focus on
-        // startup the way search used to, so nothing is focused by default.
         let key_controller = gtk::EventControllerKey::new();
         let window_weak = self.downgrade();
         let search_entry_weak = search_entry.downgrade();
@@ -739,9 +712,8 @@ impl GnosisWindow {
             library::log::log(&format!("Edited \u{201c}{}\u{201d}", book.title));
         }
 
-        book_object.set_book(book);
         if let Some(store) = self.imp().store.get() {
-            store.items_changed(index, 1, 1);
+            store.splice(index, 1, &[BookObject::new(book)]);
         }
     }
 
@@ -831,67 +803,86 @@ impl GnosisWindow {
         }
     }
 
-    /// Scans every folder configured in Preferences for EPUB files not yet
-    /// in the library, and adds them.
     pub fn scan_library_folders(&self) {
-        let imp = self.imp();
-        let Some(db) = imp.db.get() else {
+        let folders = library::settings::list_folders();
+        if folders.is_empty() {
             return;
-        };
-        let Some(store) = imp.store.get() else {
-            return;
-        };
+        }
+        tracing::info!(folders = folders.len(), "starting library folder scan");
 
-        let mut added = 0usize;
-        for folder in library::settings::list_folders() {
-            for path in library::scanner::find_epubs(&folder) {
-                let path = library::scanner::canonicalize_path(&path);
-                let already_present =
-                    library::db::book_exists_at(&db.borrow(), &path).unwrap_or(true);
-                if already_present {
-                    continue;
-                }
+        let state = Rc::new(RefCell::new(FolderScanState {
+            pending_dirs: folders.into(),
+            pending_files: std::collections::VecDeque::new(),
+            added: 0,
+            started: std::time::Instant::now(),
+            dirs_visited: 0,
+        }));
 
+        let window_weak = self.downgrade();
+        glib::idle_add_local(move || {
+            let Some(window) = window_weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            window.process_folder_scan_tick(&state)
+        });
+    }
+
+    fn process_folder_scan_tick(&self, state: &Rc<RefCell<FolderScanState>>) -> glib::ControlFlow {
+        let next_file = state.borrow_mut().pending_files.pop_front();
+        if let Some(path) = next_file {
+            let (Some(db), Some(store)) = (self.imp().db.get(), self.imp().store.get()) else {
+                return glib::ControlFlow::Break;
+            };
+
+            let path = library::scanner::canonicalize_path(&path);
+            let already_present =
+                library::db::book_exists_at(&db.borrow(), &path).unwrap_or(true);
+            if !already_present {
                 match library::scanner::scan_epub(&path) {
                     Ok(book) => {
-                        if library::db::insert_book(&db.borrow(), &book).is_err() {
-                            continue;
+                        if library::db::insert_book(&db.borrow(), &book).is_ok() {
+                            library::log::log(&format!("Added \u{201c}{}\u{201d}", book.title));
+                            store.append(&BookObject::new(book));
+                            state.borrow_mut().added += 1;
                         }
-                        library::log::log(&format!(
-                            "Added \u{201c}{}\u{201d} from {}",
-                            book.title,
-                            folder.display()
-                        ));
-                        store.append(&BookObject::new(book));
-                        added += 1;
                     }
                     Err(err) => {
                         library::log::log(&format!("Couldn't scan {}: {err}", path.display()));
                     }
                 }
             }
+            return glib::ControlFlow::Continue;
         }
 
-        if added > 0 {
-            self.update_empty_state();
-            let noun = if added == 1 { "book" } else { "books" };
-            let message = format!("Added {added} {noun} from your library folders");
-            library::log::log(&message);
-            self.show_toast(&message);
-        }
+        let next_dir = state.borrow_mut().pending_dirs.pop_front();
+        let Some(dir) = next_dir else {
+            let s = state.borrow();
+            tracing::info!(
+                added = s.added,
+                dirs_visited = s.dirs_visited,
+                elapsed = ?s.started.elapsed(),
+                "library folder scan finished"
+            );
+            let added = s.added;
+            drop(s);
+            if added > 0 {
+                self.update_empty_state();
+                let noun = if added == 1 { "book" } else { "books" };
+                let message = format!("Added {added} {noun} from your library folders");
+                library::log::log(&message);
+                self.show_toast(&message);
+            }
+            return glib::ControlFlow::Break;
+        };
+
+        let (epubs, subdirs) = library::scanner::read_dir_epubs_and_subdirs(&dir);
+        let mut s = state.borrow_mut();
+        s.dirs_visited += 1;
+        s.pending_files.extend(epubs);
+        s.pending_dirs.extend(subdirs);
+        glib::ControlFlow::Continue
     }
 
-    /// Re-reads title, author, and cover art for every book in the library
-    /// from its EPUB file (keeping the library's own data — series, reading
-    /// progress — untouched), removes entries whose file no longer exists,
-    /// and collapses duplicate entries that point at the same on-disk file
-    /// (comparing canonicalized paths, so a symlink or a `..` segment can't
-    /// hide a duplicate).
-    ///
-    /// The (fast) removal/dedup pass runs synchronously; the (potentially
-    /// slow, one-EPUB-at-a-time) re-scan pass runs one book per main-loop
-    /// idle tick, so the UI stays responsive and repaints/input keep working
-    /// throughout — this is what the corner progress notification tracks.
     pub fn refresh_all_metadata(&self) {
         enum RemovalReason {
             Missing(std::path::PathBuf),
@@ -909,9 +900,6 @@ impl GnosisWindow {
             return;
         };
 
-        // Pass 1 (synchronous — just path stats and hashmap lookups, cheap
-        // even for a large library): find books whose file is gone, and
-        // books that share a canonical path with an earlier (kept) entry.
         let mut best_by_path: std::collections::HashMap<std::path::PathBuf, (u32, i64)> =
             std::collections::HashMap::new();
         let mut to_remove: Vec<(u32, String, RemovalReason)> = Vec::new();
@@ -977,10 +965,6 @@ impl GnosisWindow {
             self.update_empty_state();
         }
 
-        // Pass 2 (potentially slow — one EPUB open + XML parse + cover
-        // decode per book): queue survivors by id (not index, since the
-        // user can still add/remove books while this runs in the
-        // background) and process one per idle tick.
         let ids: Vec<Uuid> = (0..store.n_items())
             .filter_map(|i| store.item(i).and_downcast::<BookObject>())
             .map(|object| object.book().id)
@@ -1028,9 +1012,7 @@ impl GnosisWindow {
             return glib::ControlFlow::Break;
         };
 
-        // If the user removed this book while the refresh was in flight,
-        // there's nothing left to do for it — just move on.
-        if let Some((_, book_object)) = self.find_book(id) {
+        if let Some((index, book_object)) = self.find_book(id) {
             let old_book = book_object.book();
             let canonical = library::scanner::canonicalize_path(&old_book.path);
 
@@ -1062,7 +1044,9 @@ impl GnosisWindow {
                     }
 
                     if library::db::insert_book(&db.borrow(), &updated).is_ok() {
-                        book_object.set_book(updated);
+                        if let Some(store) = self.imp().store.get() {
+                            store.splice(index, 1, &[BookObject::new(updated)]);
+                        }
                         state.borrow_mut().tally.refreshed += 1;
                     } else {
                         state.borrow_mut().tally.failed += 1;
@@ -1092,13 +1076,6 @@ impl GnosisWindow {
         imp.refreshing.set(false);
         self.set_maintenance_active(MaintenanceOp::Refresh, false);
 
-        if tally.refreshed > 0 {
-            if let Some(store) = imp.store.get() {
-                let count = store.n_items();
-                store.items_changed(0, count, count);
-            }
-        }
-
         let mut parts = Vec::new();
         if tally.refreshed > 0 {
             parts.push(format!("refreshed {}", tally.refreshed));
@@ -1121,11 +1098,6 @@ impl GnosisWindow {
         self.show_toast(&message);
     }
 
-    /// Re-reads *only* series/series_index from every book's file — unlike
-    /// `refresh_all_metadata`, which deliberately leaves them untouched.
-    /// Exists specifically to backfill books added while series parsing was
-    /// broken; leaves everything else (title, author, cover, progress,
-    /// resume position) exactly as-is.
     pub fn rescan_series(&self) {
         let imp = self.imp();
         if imp.refreshing.get() {
@@ -1179,7 +1151,7 @@ impl GnosisWindow {
             return glib::ControlFlow::Break;
         };
 
-        if let Some((_, book_object)) = self.find_book(id) {
+        if let Some((index, book_object)) = self.find_book(id) {
             let old_book = book_object.book();
             let canonical = library::scanner::canonicalize_path(&old_book.path);
 
@@ -1193,7 +1165,9 @@ impl GnosisWindow {
                         updated.series_index = scanned.series_index;
 
                         if library::db::insert_book(&db.borrow(), &updated).is_ok() {
-                            book_object.set_book(updated);
+                            if let Some(store) = self.imp().store.get() {
+                                store.splice(index, 1, &[BookObject::new(updated)]);
+                            }
                             state.borrow_mut().tally.updated += 1;
                         } else {
                             state.borrow_mut().tally.failed += 1;
@@ -1224,13 +1198,6 @@ impl GnosisWindow {
         imp.refreshing.set(false);
         self.set_maintenance_active(MaintenanceOp::RescanSeries, false);
 
-        if tally.updated > 0 {
-            if let Some(store) = imp.store.get() {
-                let count = store.n_items();
-                store.items_changed(0, count, count);
-            }
-        }
-
         let mut parts = Vec::new();
         if tally.updated > 0 {
             parts.push(format!("updated {}", tally.updated));
@@ -1247,11 +1214,6 @@ impl GnosisWindow {
         self.show_toast(&message);
     }
 
-    /// Refresh and Rescan Series share one "a background maintenance op is
-    /// running" state (`imp.refreshing`, the progress corner notification,
-    /// and each other's button being disabled) so only one can run at a
-    /// time — they both walk the same book list one idle tick at a time.
-    /// Only the button/spinner for the op that's actually running spins.
     fn set_maintenance_active(&self, op: MaintenanceOp, active: bool) {
         let imp = self.imp();
         if let Some(button) = imp.refresh_button.get() {
@@ -1318,9 +1280,6 @@ impl GnosisWindow {
         reader.title_widget.set_title(&book.title);
         reader.toc_menu.remove_all();
 
-        // The id in the path is just a cache-buster (see reader_scheme.rs) —
-        // without it, `fetch()` would keep serving the first book's cached
-        // bytes for every book opened afterward.
         let uri = format!("{}:///book/{}", super::reader_scheme::SCHEME, book.id);
         let script = super::reader::open_book_script(&uri, book.locator.as_deref());
         reader
@@ -1332,8 +1291,6 @@ impl GnosisWindow {
         }
     }
 
-    /// Called from the reader's `relocate` message: persists the resume
-    /// position for whichever book is currently open in the reader.
     pub fn save_reader_position(&self, cfi: Option<String>, fraction: f64) {
         let imp = self.imp();
         let Some(id) = *imp.reader_book_id.borrow() else {
@@ -1346,11 +1303,13 @@ impl GnosisWindow {
         {
             return;
         }
-        if let Some((_, book_object)) = self.find_book(id) {
+        if let Some((index, book_object)) = self.find_book(id) {
             let mut book = book_object.book();
             book.locator = cfi;
             book.progress = fraction;
-            book_object.set_book(book);
+            if let Some(store) = self.imp().store.get() {
+                store.splice(index, 1, &[BookObject::new(book)]);
+            }
         }
     }
 
@@ -1358,8 +1317,6 @@ impl GnosisWindow {
         self.show_toast(&format!("Couldn't open book: {message}"));
     }
 
-    /// Reconfigures the (single, reused) collection detail page for `name`
-    /// and pushes it — same "reconfigure then push" shape as `open_reader`.
     fn open_collection(&self, kind: CollectionKind, name: &str) {
         let imp = self.imp();
         let Some(detail) = imp.collection_detail.get() else {
@@ -1381,8 +1338,6 @@ impl GnosisWindow {
         }
     }
 
-    /// Cover fallback when no custom image is set: the first book in that
-    /// author's/series' collection that has one.
     fn first_cover_for(&self, kind: CollectionKind, name: &str) -> Option<std::path::PathBuf> {
         let store = self.imp().store.get()?;
         for i in 0..store.n_items() {
@@ -1465,11 +1420,8 @@ impl GnosisWindow {
         self.show_toast(&format!("Removed custom cover for \u{201c}{name}\u{201d}"));
     }
 
-    /// Rebuilds the Authors/Series tile grids from `store` — grouping by
-    /// (case-insensitively deduped) author/series name, counting books, and
-    /// resolving each tile's cover image (explicit DB cover, else the first
-    /// book in that collection with one). Called whenever `store` changes.
     fn rebuild_collections(&self) {
+        let t0 = std::time::Instant::now();
         let imp = self.imp();
         let (Some(store), Some(db)) = (imp.store.get(), imp.db.get()) else {
             return;
@@ -1490,11 +1442,16 @@ impl GnosisWindow {
             let custom_covers =
                 library::db::all_collection_covers(&db.borrow(), kind.as_str()).unwrap_or_default();
 
-            target_store.remove_all();
-            for data in super::collection_object::group_books(&books, kind, &custom_covers) {
-                target_store.append(&CollectionObject::new(data));
-            }
+            let objects: Vec<CollectionObject> =
+                super::collection_object::group_books(&books, kind, &custom_covers)
+                    .into_iter()
+                    .map(CollectionObject::new)
+                    .collect();
+            let old_count = target_store.n_items();
+            target_store.splice(0, old_count, &objects);
         }
+
+        tracing::debug!(books = books.len(), elapsed = ?t0.elapsed(), "rebuilt author/series collections");
     }
 
     fn show_toast(&self, message: &str) {
@@ -1504,8 +1461,6 @@ impl GnosisWindow {
     }
 }
 
-/// Unpacks a `win.*-collection-cover`/`win.open-collection` action's `(ss)`
-/// parameter into a `CollectionKind` and name.
 fn collection_kind_and_name(parameter: Option<&glib::Variant>) -> Option<(CollectionKind, String)> {
     let (kind, name) = parameter?.get::<(String, String)>()?;
     let kind = match kind.as_str() {
@@ -1516,8 +1471,6 @@ fn collection_kind_and_name(parameter: Option<&glib::Variant>) -> Option<(Collec
     Some((kind, name))
 }
 
-/// Compares two cached cover images by content, so a re-scan that produces
-/// byte-identical art isn't treated as a change.
 fn covers_differ(a: Option<&std::path::Path>, b: Option<&std::path::Path>) -> bool {
     match (a, b) {
         (None, None) => false,
@@ -1526,9 +1479,6 @@ fn covers_differ(a: Option<&std::path::Path>, b: Option<&std::path::Path>) -> bo
     }
 }
 
-/// The queue driving [`GnosisWindow::process_refresh_tick`]: one book id per
-/// main-loop idle tick, so a big library doesn't freeze the UI while
-/// refreshing.
 struct RefreshQueueState {
     queue: std::collections::VecDeque<Uuid>,
     total: usize,
@@ -1544,7 +1494,6 @@ struct RefreshTally {
     failed: usize,
 }
 
-/// The queue driving [`GnosisWindow::process_series_rescan_tick`].
 struct SeriesRescanState {
     queue: std::collections::VecDeque<Uuid>,
     total: usize,
@@ -1556,4 +1505,12 @@ struct SeriesRescanState {
 struct SeriesRescanTally {
     updated: usize,
     failed: usize,
+}
+
+struct FolderScanState {
+    pending_dirs: std::collections::VecDeque<std::path::PathBuf>,
+    pending_files: std::collections::VecDeque<std::path::PathBuf>,
+    added: usize,
+    started: std::time::Instant,
+    dirs_visited: usize,
 }

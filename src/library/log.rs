@@ -10,10 +10,9 @@ fn log_path() -> PathBuf {
     data_dir().join("gnosis.log")
 }
 
-/// Appends a timestamped line to the activity log, shown on the Settings
-/// page. Never fails loudly — logging is a best-effort diagnostic aid, not
-/// something that should interrupt the operation being logged.
 pub fn log(message: &str) {
+    tracing::info!("{message}");
+
     let _ = fs::create_dir_all(data_dir());
     let line = format!("[{}] {message}\n", timestamp());
     if let Ok(mut file) = fs::OpenOptions::new()
@@ -25,7 +24,6 @@ pub fn log(message: &str) {
     }
 }
 
-/// Reads the whole activity log for display.
 pub fn read() -> String {
     fs::read_to_string(log_path()).unwrap_or_default()
 }
