@@ -14,9 +14,7 @@ pub fn setup(list_item: &gtk::ListItem) {
     picture.add_css_class("card");
 
     let name_label = gtk::Label::builder()
-        .wrap(true)
-        .lines(2)
-        .max_width_chars(16)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
         .justify(gtk::Justification::Center)
         .css_classes(["heading"])
         .width_request(TILE_SIZE)
@@ -131,3 +129,4 @@ pub fn factory() -> gtk::SignalListItemFactory {
     });
     factory
 }
+
