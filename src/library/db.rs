@@ -29,11 +29,6 @@ pub fn init_db() -> Result<Connection> {
         .context("creating collection covers directory")?;
 
     let conn = Connection::open(dir.join("library.db")).context("opening library database")?;
-    // default journal mode fsyncs twice per write (journal + main db file);
-    // reader position is saved on every relocate event (several per page
-    // turn), so on the default mode that's several blocking fsyncs on the
-    // GTK main thread per page turn. WAL + NORMAL only fsyncs the WAL
-    // periodically, not per-write.
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
         .context("configuring database pragmas")?;
     conn.execute(
