@@ -108,21 +108,11 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
 
     let settings = webkit6::Settings::new();
     settings.set_enable_write_console_messages_to_stdout(true);
-    // matches the actual Foliate app's WebKit settings; none of these showed
-    // a measurable effect on chapter-crossing time in isolation, but no
-    // evidence of harm either (unlike CacheModel::WebBrowser, which was a
-    // clean, repeatable regression and is deliberately not set)
     settings.set_enable_html5_database(false);
     settings.set_enable_html5_local_storage(false);
     settings.set_enable_back_forward_navigation_gestures(false);
     settings.set_enable_smooth_scrolling(false);
-    // forcing this to Never was tried to test the DMA-BUF handoff theory and
-    // made things actively worse (intermittent missing spinner, rendering
-    // corruption) rather than clarifying anything — reverted to Always,
-    // which was at least stable and neutral
     settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Always);
-    // lets us open WebKit's own inspector (right-click -> Inspect Element)
-    // to profile the content process directly instead of guessing settings
     settings.set_enable_developer_extras(true);
 
     let web_view = webkit6::WebView::builder()
@@ -133,11 +123,6 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
         .hexpand(true)
         .build();
 
-    // a page-content spinner would be animated by the WebView's own content
-    // process, which is exactly the thread that's busy during a slow chapter
-    // crossing — so it just freezes when it's needed most. A GTK-native
-    // spinner is driven by GTK's own compositor and keeps spinning
-    // regardless of what the WebView's main thread is doing.
     let spinner_widget = gtk::Spinner::builder()
         .halign(gtk::Align::Center)
         .valign(gtk::Align::Center)
