@@ -95,16 +95,6 @@ function positionFooter(centers) {
 }
 window.addEventListener('resize', () => positionFooter(columnCenters()))
 
-// `Loader.loadItem()` in epub.js has no in-flight dedup: calling
-// `section.load()` a second time before the first call has resolved
-// re-decompresses from scratch, and whichever call's `createURL()` finishes
-// second silently clobbers the cache slot the first one wrote (leaking its
-// blob URL). Prefetching a neighbor is exactly the situation that can race
-// a real page-turn into the same section, so each prefetched section gets
-// wrapped, once, the first time we touch it, so every caller — us or
-// paginator.js's own `#goTo` — shares one in-flight promise and a real
-// reference count; the underlying section is only actually unloaded once
-// nobody holds it anymore.
 function wrapSection(section) {
     if (section.__gnosisRefs !== undefined) return
     const realLoad = section.load
