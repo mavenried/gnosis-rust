@@ -26,12 +26,6 @@ pub struct ReaderWidgets {
     pub spinner: SpinnerHandle,
 }
 
-// wraps the spinner with a debounce: `show_soon()` only actually shows it
-// after a short delay, so a routine fast intra-chapter page turn (~100ms)
-// never flashes it, but a real chapter crossing or book open clears the
-// delay comfortably. The delay timer runs on GTK's own main loop, not the
-// WebView's content process, so it isn't vulnerable to the same freeze the
-// spinner itself is meant to survive.
 #[derive(Clone)]
 pub struct SpinnerHandle {
     spinner: gtk::Spinner,
@@ -106,9 +100,6 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
     let current_book: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
     let current_book_id: Rc<RefCell<Option<Uuid>>> = Rc::new(RefCell::new(None));
 
-    // the actual Foliate app uses the shared default context rather than a
-    // fresh isolated one; testing whether that matters for per-navigation
-    // overhead now that content-independent lag rules out layout/paint cost
     let context = webkit6::WebContext::default().unwrap_or_else(webkit6::WebContext::new);
     reader_scheme::register(&context);
 
