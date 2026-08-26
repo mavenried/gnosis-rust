@@ -12,12 +12,219 @@
   foliate-view {
     display: block;
     width: 100%;
-    height: 100vh;
+    height: calc(100vh - 28px);
+  }
+  #footer {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 28px;
+    font-size: 12px;
+    opacity: 0.6;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  #footer-loc,
+  #footer-page {
+    position: absolute;
+    top: 50%;
+    transform: translate(-50%, -50%);
+  }
+  body.rsvp-active #footer {
+    display: none;
+  }
+  #rsvp-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-family: sans-serif;
+  }
+  #rsvp-overlay.visible {
+    display: flex;
+  }
+  #rsvp-word {
+    font-size: 48px;
+    display: flex;
+    align-items: baseline;
+    width: 90vw;
+    max-width: 700px;
+  }
+  #rsvp-before,
+  #rsvp-after {
+    flex: 1 0 0;
+    white-space: pre;
+  }
+  #rsvp-before {
+    text-align: right;
+  }
+  #rsvp-after {
+    text-align: left;
+  }
+  #rsvp-pivot {
+    flex: 0 0 auto;
+    color: #d1453b;
+    font-weight: 600;
+    white-space: pre;
+  }
+  #rsvp-controls {
+    position: absolute;
+    bottom: 32px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    font-size: 14px;
+    opacity: 0.85;
+  }
+  #rsvp-controls button {
+    font: inherit;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid currentColor;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+  }
+  #rsvp-wpm-label {
+    min-width: 7em;
+    text-align: center;
+  }
+  #rsvp-close {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+  }
+  #search-panel {
+    display: none;
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 320px;
+    max-width: 90vw;
+    z-index: 9;
+    flex-direction: column;
+    font-family: sans-serif;
+    font-size: 13px;
+    box-shadow: -4px 0 12px rgba(0, 0, 0, 0.15);
+  }
+  #search-panel.visible {
+    display: flex;
+  }
+  #search-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px;
+  }
+  #search-input {
+    flex: 1 1 auto;
+    font: inherit;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid currentColor;
+    background: transparent;
+    color: inherit;
+    min-width: 0;
+  }
+  #search-close {
+    font: inherit;
+    border: none;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font-size: 16px;
+    opacity: 0.7;
+  }
+  #search-scope {
+    display: flex;
+    gap: 6px;
+    padding: 0 10px 8px;
+  }
+  #search-scope button {
+    font: inherit;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+    background: transparent;
+    color: inherit;
+    opacity: 0.6;
+    cursor: pointer;
+  }
+  #search-scope button.active {
+    opacity: 1;
+    font-weight: 600;
+  }
+  #search-status {
+    padding: 0 10px 8px;
+    opacity: 0.6;
+  }
+  #search-results {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    border-top: 1px solid currentColor;
+  }
+  .search-group-label {
+    padding: 8px 10px 2px;
+    font-weight: 600;
+    opacity: 0.7;
+  }
+  .search-result {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 6px 10px;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    line-height: 1.4;
+  }
+  .search-result:hover {
+    background: rgba(128, 128, 128, 0.15);
+  }
+  .search-result mark {
+    background: transparent;
+    color: inherit;
+    font-weight: 700;
+    text-decoration: underline;
   }
 </style>
 </head>
 <body>
 <foliate-view id="view"></foliate-view>
+<div id="footer">
+  <span id="footer-loc"></span>
+  <span id="footer-page"></span>
+</div>
+<div id="rsvp-overlay">
+  <div id="rsvp-word"><span id="rsvp-before"></span><span id="rsvp-pivot"></span><span id="rsvp-after"></span></div>
+  <div id="rsvp-controls">
+    <button id="rsvp-wpm-down">&minus;</button>
+    <span id="rsvp-wpm-label"></span>
+    <button id="rsvp-wpm-up">+</button>
+    <button id="rsvp-play-pause">Pause</button>
+  </div>
+  <button id="rsvp-close">&times;</button>
+</div>
+<div id="search-panel">
+  <div id="search-header">
+    <input type="text" id="search-input" placeholder="Search…">
+    <button id="search-close">&times;</button>
+  </div>
+  <div id="search-scope">
+    <button id="search-scope-book" class="active">Whole Book</button>
+    <button id="search-scope-chapter">This Chapter</button>
+  </div>
+  <div id="search-status"></div>
+  <div id="search-results"></div>
+</div>
+<input type="file" id="file-input" hidden>
 <script type="module" src="reader.js"></script>
 </body>
 </html>

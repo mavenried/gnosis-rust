@@ -551,7 +551,6 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "soup3",
  "thiserror",
  "time",
  "tracing",
