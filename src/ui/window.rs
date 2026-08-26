@@ -492,6 +492,7 @@ impl GnosisWindow {
                 return;
             };
             if let Some(reader) = window.imp().reader.get() {
+                reader.spinner.show_soon();
                 let script = super::reader::goto_script(href);
                 reader.web_view.evaluate_javascript(
                     &script,
@@ -553,6 +554,38 @@ impl GnosisWindow {
             window.remove_book(id);
         });
         self.add_action(&remove_action);
+
+        let mark_read_action = gio::SimpleAction::new("mark-book-read", Some(glib::VariantTy::STRING));
+        let window_weak = self.downgrade();
+        mark_read_action.connect_activate(move |_, parameter| {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let Some(id) = parameter
+                .and_then(glib::Variant::str)
+                .and_then(|s| Uuid::parse_str(s).ok())
+            else {
+                return;
+            };
+            window.set_book_read(id, true);
+        });
+        self.add_action(&mark_read_action);
+
+        let mark_unread_action = gio::SimpleAction::new("mark-book-unread", Some(glib::VariantTy::STRING));
+        let window_weak = self.downgrade();
+        mark_unread_action.connect_activate(move |_, parameter| {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let Some(id) = parameter
+                .and_then(glib::Variant::str)
+                .and_then(|s| Uuid::parse_str(s).ok())
+            else {
+                return;
+            };
+            window.set_book_read(id, false);
+        });
+        self.add_action(&mark_unread_action);
 
         let collection_target_type = glib::VariantTy::new("(ss)").expect("valid variant type");
 
@@ -624,6 +657,43 @@ impl GnosisWindow {
     fn edit_book(&self, id: Uuid) {
         if let Some((_, book_object)) = self.find_book(id) {
             super::edit_dialog::present(self, book_object.book());
+        }
+    }
+
+    fn set_book_read(&self, id: Uuid, read: bool) {
+        let Some((index, book_object)) = self.find_book(id) else {
+            return;
+        };
+        let Some(db) = self.imp().db.get() else {
+            return;
+        };
+
+        let mut book = book_object.book();
+        if read {
+            book.progress = 1.0;
+        } else {
+            book.progress = 0.0;
+            book.locator = None;
+        }
+
+        if library::db::update_reader_position(
+            &db.borrow(),
+            id,
+            book.locator.as_deref(),
+            book.progress,
+        )
+        .is_err()
+        {
+            return;
+        }
+        library::log::log(&format!(
+            "Marked \u{201c}{}\u{201d} as {}",
+            book.title,
+            if read { "read" } else { "unread" }
+        ));
+
+        if let Some(store) = self.imp().store.get() {
+            store.splice(index, 1, &[BookObject::new(book)]);
         }
     }
 
@@ -1276,12 +1346,16 @@ impl GnosisWindow {
         };
 
         *reader.current_book.borrow_mut() = Some(book.path.clone());
+        *reader.current_book_id.borrow_mut() = Some(book.id);
         *imp.reader_book_id.borrow_mut() = Some(book.id);
         reader.title_widget.set_title(&book.title);
         reader.toc_menu.remove_all();
 
-        let uri = format!("{}:///book/{}", super::reader_scheme::SCHEME, book.id);
-        let script = super::reader::open_book_script(&uri, book.locator.as_deref());
+        let prefs = library::reader_prefs::load_for(book.id);
+        (reader.apply_prefs)(&prefs);
+
+        reader.spinner.show_soon();
+        let script = super::reader::open_book_script(book.locator.as_deref(), &prefs);
         reader
             .web_view
             .evaluate_javascript(&script, None, None, gio::Cancellable::NONE, |_| {});

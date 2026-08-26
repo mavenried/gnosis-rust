@@ -173,13 +173,27 @@ pub fn setup(list_item: &gtk::ListItem) {
         let Some(book_object) = list_item_for_click.item().and_downcast::<BookObject>() else {
             return;
         };
-        let book_id = book_object.book().id.to_string();
+        let book = book_object.book();
+        let book_id = book.id.to_string();
+        let status = book.reading_status();
 
         let menu = gio::Menu::new();
         menu.append(
             Some("Edit Metadata…"),
             Some(format!("win.edit-book('{book_id}')").as_str()),
         );
+        if status != ReadingStatus::Read {
+            menu.append(
+                Some("Mark as Read"),
+                Some(format!("win.mark-book-read('{book_id}')").as_str()),
+            );
+        }
+        if status != ReadingStatus::Unread {
+            menu.append(
+                Some("Mark as Unread"),
+                Some(format!("win.mark-book-unread('{book_id}')").as_str()),
+            );
+        }
         menu.append(
             Some("Remove from Library"),
             Some(format!("win.remove-book('{book_id}')").as_str()),
@@ -252,14 +266,30 @@ pub fn bind(list_item: &gtk::ListItem) {
     author_label.set_label(book.author.as_deref().unwrap_or(""));
     author_label.set_visible(book.author.is_some());
 
-    let is_reading = book.reading_status() == ReadingStatus::Reading;
-    progress_pie.set_visible(is_reading);
-    if is_reading {
-        let fraction = book.progress.clamp(0.0, 1.0);
-        progress_pie.set_draw_func(move |_, cr, width, height| {
-            draw_progress_pie(cr, width, height, fraction);
-        });
+    let status = book.reading_status();
+    progress_pie.set_visible(status != ReadingStatus::Unread);
+    match status {
+        ReadingStatus::Reading => {
+            let fraction = book.progress.clamp(0.0, 1.0);
+            progress_pie.set_draw_func(move |_, cr, width, height| {
+                draw_progress_pie(cr, width, height, fraction);
+            });
+        }
+        ReadingStatus::Read => {
+            progress_pie.set_draw_func(move |_, cr, width, height| {
+                draw_read_check(cr, width, height);
+            });
+        }
+        ReadingStatus::Unread => {}
     }
+}
+
+/// The backing disc shared by both badges — an opaque grey circle so
+/// either reads clearly over any cover art.
+fn draw_badge_disc(cr: &gtk::cairo::Context, cx: f64, cy: f64, radius: f64) {
+    cr.arc(cx, cy, radius, 0.0, std::f64::consts::TAU);
+    cr.set_source_rgba(0.35, 0.35, 0.37, 0.92);
+    let _ = cr.fill();
 }
 
 fn draw_progress_pie(cr: &gtk::cairo::Context, width: i32, height: i32, fraction: f64) {
@@ -267,9 +297,7 @@ fn draw_progress_pie(cr: &gtk::cairo::Context, width: i32, height: i32, fraction
     let (cx, cy) = (w / 2.0, h / 2.0);
     let radius = w.min(h) / 2.0;
 
-    cr.arc(cx, cy, radius, 0.0, std::f64::consts::TAU);
-    cr.set_source_rgba(0.35, 0.35, 0.37, 0.92);
-    let _ = cr.fill();
+    draw_badge_disc(cr, cx, cy, radius);
 
     let start = -std::f64::consts::FRAC_PI_2;
     let end = start + fraction * std::f64::consts::TAU;
@@ -279,6 +307,25 @@ fn draw_progress_pie(cr: &gtk::cairo::Context, width: i32, height: i32, fraction
     cr.close_path();
     cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
     let _ = cr.fill();
+}
+
+/// Same backing disc as the progress pie, with a checkmark instead of a
+/// wedge — marks a book as finished rather than showing a fraction.
+fn draw_read_check(cr: &gtk::cairo::Context, width: i32, height: i32) {
+    let (w, h) = (f64::from(width), f64::from(height));
+    let (cx, cy) = (w / 2.0, h / 2.0);
+    let radius = w.min(h) / 2.0;
+
+    draw_badge_disc(cr, cx, cy, radius);
+
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+    cr.set_line_width((radius * 0.22).max(1.5));
+    cr.set_line_cap(gtk::cairo::LineCap::Round);
+    cr.set_line_join(gtk::cairo::LineJoin::Round);
+    cr.move_to(cx - radius * 0.45, cy + radius * 0.05);
+    cr.line_to(cx - radius * 0.12, cy + radius * 0.4);
+    cr.line_to(cx + radius * 0.5, cy - radius * 0.35);
+    let _ = cr.stroke();
 }
 
 pub fn factory() -> gtk::SignalListItemFactory {
