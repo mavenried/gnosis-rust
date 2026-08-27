@@ -48,13 +48,16 @@ pub fn init_db() -> Result<Connection> {
             cover_path    TEXT,
             added_at      INTEGER NOT NULL,
             progress      REAL NOT NULL DEFAULT 0,
-            locator       TEXT
+            locator       TEXT,
+            last_opened_at INTEGER
         )",
         [],
     )
     .context("creating books table")?;
 
     conn.execute("ALTER TABLE books ADD COLUMN locator TEXT", [])
+        .ok();
+    conn.execute("ALTER TABLE books ADD COLUMN last_opened_at INTEGER", [])
         .ok();
 
     conn.execute(
@@ -74,8 +77,8 @@ pub fn init_db() -> Result<Connection> {
 pub fn insert_book(conn: &Connection, book: &Book) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO books
-            (id, title, author, series, series_index, path, format, cover_path, added_at, progress, locator)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            (id, title, author, series, series_index, path, format, cover_path, added_at, progress, locator, last_opened_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             book.id.to_string(),
             book.title,
@@ -90,6 +93,7 @@ pub fn insert_book(conn: &Connection, book: &Book) -> Result<()> {
             book.added_at,
             book.progress,
             book.locator,
+            book.last_opened_at,
         ],
     )
     .context("inserting book")?;
@@ -98,7 +102,7 @@ pub fn insert_book(conn: &Connection, book: &Book) -> Result<()> {
 
 pub fn list_books(conn: &Connection) -> Result<Vec<Book>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, author, series, series_index, path, format, cover_path, added_at, progress, locator
+        "SELECT id, title, author, series, series_index, path, format, cover_path, added_at, progress, locator, last_opened_at
          FROM books ORDER BY title COLLATE NOCASE ASC",
     )?;
 
@@ -119,11 +123,21 @@ pub fn list_books(conn: &Connection) -> Result<Vec<Book>> {
             added_at: row.get(8)?,
             progress: row.get(9)?,
             locator: row.get(10)?,
+            last_opened_at: row.get(11)?,
         })
     })?;
 
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .context("listing books")
+}
+
+pub fn touch_last_opened(conn: &Connection, id: Uuid) -> Result<()> {
+    conn.execute(
+        "UPDATE books SET last_opened_at = ?1 WHERE id = ?2",
+        params![Book::now(), id.to_string()],
+    )
+    .context("updating last opened time")?;
+    Ok(())
 }
 
 pub fn delete_book(conn: &Connection, id: Uuid) -> Result<()> {
@@ -184,3 +198,4 @@ pub fn all_collection_covers(conn: &Connection, kind: &str) -> Result<HashMap<St
     rows.collect::<rusqlite::Result<HashMap<_, _>>>()
         .context("listing collection covers")
 }
+

@@ -79,6 +79,7 @@ pub fn scan_epub(path: &Path) -> Result<Book> {
         added_at: Book::now(),
         progress: 0.0,
         locator: None,
+        last_opened_at: None,
     })
 }
 

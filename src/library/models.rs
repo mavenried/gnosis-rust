@@ -16,6 +16,7 @@ pub struct Book {
     pub added_at: i64,
     pub progress: f64,
     pub locator: Option<String>,
+    pub last_opened_at: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

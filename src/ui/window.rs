@@ -170,6 +170,7 @@ impl GnosisWindow {
                     .cmp(&b.author.as_deref().unwrap_or_default().to_lowercase())
                     .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
                 "added" => b.added_at.cmp(&a.added_at),
+                "recency" => b.last_opened_at.cmp(&a.last_opened_at),
                 "series" => {
                     let a_has_series = a.series.is_some();
                     let b_has_series = b.series.is_some();
@@ -340,6 +341,7 @@ impl GnosisWindow {
         sort_menu.append(Some("Title"), Some("win.sort-by('title')"));
         sort_menu.append(Some("Author"), Some("win.sort-by('author')"));
         sort_menu.append(Some("Date Added"), Some("win.sort-by('added')"));
+        sort_menu.append(Some("Recently Read"), Some("win.sort-by('recency')"));
         sort_menu.append(Some("Series"), Some("win.sort-by('series')"));
         let sort_button = gtk::MenuButton::builder()
             .icon_name("view-sort-descending-symbolic")
@@ -1334,6 +1336,17 @@ impl GnosisWindow {
         *reader.current_book_id.borrow_mut() = Some(book.id);
         *imp.reader_book_id.borrow_mut() = Some(book.id);
         reader.title_widget.set_title(&book.title);
+
+        if let Some(db) = imp.db.get()
+            && library::db::touch_last_opened(&db.borrow(), book.id).is_ok()
+            && let Some((index, book_object)) = self.find_book(book.id)
+        {
+            let mut updated = book_object.book();
+            updated.last_opened_at = Some(library::Book::now());
+            if let Some(store) = imp.store.get() {
+                store.splice(index, 1, &[BookObject::new(updated)]);
+            }
+        }
 
         let cache_dir = library::db::book_cache_dir().join(book.id.to_string());
         if !cache_dir.exists()
