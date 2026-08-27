@@ -782,6 +782,9 @@ impl GnosisWindow {
         let _ = std::fs::remove_file(
             library::db::book_cache_dir().join(format!("{id}.json")),
         );
+        let _ = std::fs::remove_file(
+            library::db::book_cache_dir().join(format!("{id}.source.json")),
+        );
 
         if let Some(store) = self.imp().store.get() {
             store.remove(index);
@@ -1004,6 +1007,9 @@ impl GnosisWindow {
             let _ = std::fs::remove_dir_all(library::db::book_cache_dir().join(removed_id.to_string()));
             let _ = std::fs::remove_file(
                 library::db::book_cache_dir().join(format!("{removed_id}.json")),
+            );
+            let _ = std::fs::remove_file(
+                library::db::book_cache_dir().join(format!("{removed_id}.source.json")),
             );
             store.remove(*index);
             removed += 1;
@@ -1349,7 +1355,7 @@ impl GnosisWindow {
         }
 
         let cache_dir = library::db::book_cache_dir().join(book.id.to_string());
-        if !cache_dir.exists()
+        if (!cache_dir.exists() || library::scanner::is_cache_stale(book.id, &book.path))
             && let Err(err) = library::scanner::unpack_book(book.id, &book.path)
         {
             self.show_reader_error(&format!("Couldn't open book: {err}"));

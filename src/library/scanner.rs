@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result, anyhow};
 use epub::doc::EpubDoc;
 use gdk_pixbuf::prelude::*;
 use gdk_pixbuf::{InterpType, Pixbuf, PixbufLoader};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zip::ZipArchive;
 
@@ -83,8 +85,50 @@ pub fn scan_epub(path: &Path) -> Result<Book> {
     })
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+struct SourceFingerprint {
+    size: u64,
+    mtime: i64,
+}
+
+fn fingerprint_path(id: Uuid) -> PathBuf {
+    book_cache_dir().join(format!("{id}.source.json"))
+}
+
+fn source_fingerprint(path: &Path) -> Result<SourceFingerprint> {
+    let meta = std::fs::metadata(path).context("reading epub metadata")?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Ok(SourceFingerprint {
+        size: meta.len(),
+        mtime,
+    })
+}
+
+/// Whether `id`'s unpacked cache is missing or was built from a version of
+/// `path` that no longer matches the file on disk (by size and mtime, not a
+/// full hash — cheap enough to check on every open without undoing the
+/// point of unpacking).
+pub fn is_cache_stale(id: Uuid, path: &Path) -> bool {
+    let Ok(current) = source_fingerprint(path) else {
+        return true;
+    };
+    let Ok(recorded_json) = std::fs::read_to_string(fingerprint_path(id)) else {
+        return true;
+    };
+    let Ok(recorded) = serde_json::from_str::<SourceFingerprint>(&recorded_json) else {
+        return true;
+    };
+    recorded != current
+}
+
 pub fn unpack_book(id: Uuid, path: &Path) -> Result<()> {
     let dest_dir = book_cache_dir().join(id.to_string());
+    let fingerprint = source_fingerprint(path)?;
     let file = std::fs::File::open(path).context("opening epub for unpacking")?;
     let mut archive =
         ZipArchive::new(BufReader::new(file)).context("reading epub as a zip archive")?;
@@ -113,6 +157,11 @@ pub fn unpack_book(id: Uuid, path: &Path) -> Result<()> {
     let manifest_path = book_cache_dir().join(format!("{id}.json"));
     let manifest_json = serde_json::to_string(&manifest).context("serializing book manifest")?;
     std::fs::write(&manifest_path, manifest_json).context("writing book manifest")?;
+
+    let fingerprint_json =
+        serde_json::to_string(&fingerprint).context("serializing source fingerprint")?;
+    std::fs::write(fingerprint_path(id), fingerprint_json)
+        .context("writing source fingerprint")?;
 
     Ok(())
 }
