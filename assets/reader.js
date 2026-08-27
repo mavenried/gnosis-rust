@@ -3,6 +3,14 @@ import { textWalker } from './foliate-js/text-walker.js'
 
 const view = document.getElementById('view')
 
+let markStart = 0
+function mark(label) {
+    const now = performance.now()
+    if (!markStart) markStart = now
+    console.log(`[timing] ${label} +${(now - markStart).toFixed(1)}ms`)
+}
+window.gnosisMark = mark
+
 async function fetchOk(url) {
     console.log(`[cache] fetching ${url}`)
     const res = await fetch(url)
@@ -126,7 +134,9 @@ function wrapSection(section) {
 
 const PREFETCH_RADIUS = 2
 let prefetched = new Set()
+let prewarmed = new Set()
 view.addEventListener('load', ({ detail }) => {
+    mark('section load event')
     const sections = view.book?.sections
     if (!sections) return
     const idx = detail.index
@@ -143,9 +153,17 @@ view.addEventListener('load', ({ detail }) => {
         wrapSection(section)
         section.load()
     }
+
+    const neighbors = new Set()
+    if (idx - 1 >= 0) neighbors.add(idx - 1)
+    if (idx + 1 < sections.length) neighbors.add(idx + 1)
+    for (const i of prewarmed) if (!neighbors.has(i)) view.renderer?.dropPrewarm?.(i)
+    prewarmed = neighbors
+    for (const i of prewarmed) view.renderer?.prewarm?.(i)
 })
 
 view.addEventListener('relocate', e => {
+    mark('relocate event')
     const { cfi, fraction, location, pageItem } = e.detail
 
     const centers = columnCenters()
@@ -525,6 +543,7 @@ window.gnosisOpenBook = async (bookId, lastCfi, style) => {
     try {
         if (style) window.gnosisSetStyle(style)
         prefetched = new Set()
+        prewarmed = new Set()
         view.close()
         console.log('[cache] view.close() done, calling openBookFromCache')
         const book = await openBookFromCache(bookId)
@@ -552,7 +571,15 @@ window.gnosisOpenBook = async (bookId, lastCfi, style) => {
 }
 
 window.gnosisGoTo = href => view.goTo(href)
-window.gnosisNext = () => view.next()
-window.gnosisPrev = () => view.prev()
+window.gnosisNext = () => {
+    markStart = 0
+    mark('next() called')
+    return view.next().then(() => mark('next() resolved'))
+}
+window.gnosisPrev = () => {
+    markStart = 0
+    mark('prev() called')
+    return view.prev().then(() => mark('prev() resolved'))
+}
 window.gnosisScrollBy = (dx, dy) => view.renderer?.scrollBy(dx, dy)
 window.gnosisSnap = (vx, vy) => view.renderer?.snap(vx, vy)

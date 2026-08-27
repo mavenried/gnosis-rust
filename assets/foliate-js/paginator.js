@@ -252,10 +252,13 @@ class View {
     }
     async load(src, afterLoad, beforeRender) {
         if (typeof src !== 'string') throw new Error(`${src} is not string`)
+        window.gnosisMark?.(`View.load: src assigned (len=${src.length})`)
         return new Promise(resolve => {
             this.#iframe.addEventListener('load', () => {
+                window.gnosisMark?.('View.load: iframe onload fired')
                 const doc = this.document
                 afterLoad?.(doc)
+                window.gnosisMark?.('View.load: afterLoad done')
 
                 // it needs to be visible for Firefox to get computed style
                 this.#iframe.style.display = 'block'
@@ -269,7 +272,9 @@ class View {
                 this.#contentRange.selectNodeContents(doc.body)
                 const layout = beforeRender?.({ vertical, rtl, background })
                 this.#iframe.style.display = 'block'
+                window.gnosisMark?.('View.load: beforeRender done, calling render')
                 this.render(layout)
+                window.gnosisMark?.('View.load: render done')
                 this.#observer.observe(doc.body)
 
                 // the resize observer above doesn't work in Firefox
@@ -434,6 +439,7 @@ export class Paginator extends HTMLElement {
     #header
     #footer
     #view
+    #pool = new Map()
     #vertical = false
     #rtl = false
     #margin = 0
@@ -751,6 +757,77 @@ export class Paginator extends HTMLElement {
 
         return { height, width, margin, gap, columnWidth }
     }
+    #computeLayoutFor(vertical) {
+        const { width, height } = this.#container.getBoundingClientRect()
+        const size = vertical ? height : width
+        const style = getComputedStyle(this.#top)
+        const maxInlineSize = parseFloat(style.getPropertyValue('--_max-inline-size'))
+        const maxColumnCount = parseInt(style.getPropertyValue('--_max-column-count-spread'))
+        const margin = parseFloat(style.getPropertyValue('--_margin'))
+        const g = parseFloat(style.getPropertyValue('--_gap')) / 100
+        const gap = -g / (g - 1) * size
+        const flow = this.getAttribute('flow')
+        if (flow === 'scrolled') return { flow, margin, gap, columnWidth: maxInlineSize }
+        const divisor = Math.min(maxColumnCount, Math.ceil(size / maxInlineSize))
+        const columnWidth = (size / divisor) - gap
+        return { height, width, margin, gap, columnWidth }
+    }
+    prewarm(index) {
+        if (index === this.#index || this.#pool.has(index)) return
+        if (!this.#canGoToIndex(index)) return
+        const section = this.sections[index]
+        if (!section || section.linear === 'no') return
+        Promise.resolve(section.load()).then(src => {
+            if (!src || index === this.#index || this.#pool.has(index)) return
+            const view = new View({ container: this, onExpand: () => {} })
+            const rect = this.#container.getBoundingClientRect()
+            Object.assign(view.element.style, {
+                position: 'absolute', top: '0', left: '0',
+                width: `${rect.width}px`, height: `${rect.height}px`,
+                visibility: 'hidden', pointerEvents: 'none',
+            })
+            this.#container.append(view.element)
+            const afterLoad = doc => {
+                if (doc.head) {
+                    const $styleBefore = doc.createElement('style')
+                    doc.head.prepend($styleBefore)
+                    const $style = doc.createElement('style')
+                    doc.head.append($style)
+                    this.#styleMap.set(doc, [$styleBefore, $style])
+                    if (Array.isArray(this.#styles)) {
+                        const [beforeStyle, style] = this.#styles
+                        $styleBefore.textContent = beforeStyle
+                        $style.textContent = style
+                    } else if (this.#styles) {
+                        $style.textContent = this.#styles
+                    }
+                }
+            }
+            const beforeRender = ({ vertical }) => this.#computeLayoutFor(vertical)
+            view.load(src, afterLoad, beforeRender).then(() => {
+                if (this.#pool.get(index) !== undefined || index === this.#index) {
+                    view.destroy()
+                    view.element.remove()
+                    return
+                }
+                this.dispatchEvent(new CustomEvent('create-overlayer', {
+                    detail: { doc: view.document, index,
+                        attach: overlayer => view.overlayer = overlayer },
+                }))
+                this.#pool.set(index, view)
+            })
+        }).catch(e => {
+            console.warn(e)
+            console.warn(new Error(`Failed to prewarm section ${index}`))
+        })
+    }
+    dropPrewarm(index) {
+        const view = this.#pool.get(index)
+        if (!view) return
+        this.#pool.delete(index)
+        view.destroy()
+        view.element.remove()
+    }
     render() {
         if (!this.#view) return
         this.#view.render(this.#beforeRender({
@@ -972,7 +1049,22 @@ export class Paginator extends HTMLElement {
         const { index, src, anchor, onLoad, select } = await promise
         this.#index = index
         const hasFocus = this.#view?.document?.hasFocus()
-        if (src) {
+        const pooled = this.#pool.get(index)
+        if (pooled) {
+            this.#pool.delete(index)
+            if (this.#view) {
+                this.#view.destroy()
+                this.#container.removeChild(this.#view.element)
+            }
+            Object.assign(pooled.element.style, {
+                position: 'relative', top: '', left: '',
+                visibility: '', pointerEvents: '',
+            })
+            this.#view = pooled
+            const doc = pooled.document
+            this.#beforeRender({ ...getDirection(doc), background: getBackground(doc) })
+            onLoad?.({ doc, index })
+        } else if (src) {
             const view = this.#createView()
             const afterLoad = doc => {
                 if (doc.head) {
@@ -1010,8 +1102,12 @@ export class Paginator extends HTMLElement {
                 this.setStyles(this.#styles)
                 this.dispatchEvent(new CustomEvent('load', { detail }))
             }
+            window.gnosisMark?.(`#goTo: calling sections[${index}].load()`)
             await this.#display(Promise.resolve(this.sections[index].load())
-                .then(src => ({ index, src, anchor, onLoad, select }))
+                .then(src => {
+                    window.gnosisMark?.(`#goTo: sections[${index}].load() resolved`)
+                    return { index, src, anchor, onLoad, select }
+                })
                 .catch(e => {
                     console.warn(e)
                     console.warn(new Error(`Failed to load section ${index}`))
@@ -1066,7 +1162,6 @@ export class Paginator extends HTMLElement {
             index: this.#adjacentIndex(dir),
             anchor: prev ? () => 1 : () => 0,
         })
-        if (shouldGo || !this.hasAttribute('animated')) await wait(100)
         this.#locked = false
     }
     prev(distance) {
@@ -1124,6 +1219,7 @@ export class Paginator extends HTMLElement {
         this.#view = null
         this.sections[this.#index]?.unload?.()
         this.#mediaQuery.removeEventListener('change', this.#mediaQueryListener)
+        for (const index of this.#pool.keys()) this.dropPrewarm(index)
     }
 }
 
