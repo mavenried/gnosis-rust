@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -5,8 +7,9 @@ use epub::doc::EpubDoc;
 use gdk_pixbuf::prelude::*;
 use gdk_pixbuf::{InterpType, Pixbuf, PixbufLoader};
 use uuid::Uuid;
+use zip::ZipArchive;
 
-use super::db::covers_dir;
+use super::db::{book_cache_dir, covers_dir};
 use super::models::Book;
 
 const MAX_COVER_WIDTH: i32 = 256;
@@ -62,6 +65,8 @@ pub fn scan_epub(path: &Path) -> Result<Book> {
         None => None,
     };
 
+    unpack_book(id, path)?;
+
     Ok(Book {
         id,
         title,
@@ -75,6 +80,40 @@ pub fn scan_epub(path: &Path) -> Result<Book> {
         progress: 0.0,
         locator: None,
     })
+}
+
+pub fn unpack_book(id: Uuid, path: &Path) -> Result<()> {
+    let dest_dir = book_cache_dir().join(id.to_string());
+    let file = std::fs::File::open(path).context("opening epub for unpacking")?;
+    let mut archive =
+        ZipArchive::new(BufReader::new(file)).context("reading epub as a zip archive")?;
+
+    let mut manifest: HashMap<String, u64> = HashMap::new();
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).context("reading zip entry")?;
+        if entry.is_dir() {
+            continue;
+        }
+        let Some(rel_path) = entry.enclosed_name() else {
+            continue;
+        };
+        let name = entry.name().to_string();
+        let size = entry.size();
+
+        let out_path = dest_dir.join(&rel_path);
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).context("creating book cache subdirectory")?;
+        }
+        let mut out_file = std::fs::File::create(&out_path).context("creating unpacked file")?;
+        std::io::copy(&mut entry, &mut out_file).context("extracting zip entry")?;
+        manifest.insert(name, size);
+    }
+
+    let manifest_path = book_cache_dir().join(format!("{id}.json"));
+    let manifest_json = serde_json::to_string(&manifest).context("serializing book manifest")?;
+    std::fs::write(&manifest_path, manifest_json).context("writing book manifest")?;
+
+    Ok(())
 }
 
 fn parse_series<R: std::io::Read + std::io::Seek>(

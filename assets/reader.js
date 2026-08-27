@@ -2,34 +2,43 @@ import './foliate-js/view.js'
 import { textWalker } from './foliate-js/text-walker.js'
 
 const view = document.getElementById('view')
-const fileInput = document.getElementById('file-input')
 
-function pickBookFile() {
-    return new Promise((resolve, reject) => {
-        fileInput.onchange = () => {
-            const file = fileInput.files?.[0]
-            fileInput.value = ''
-            if (file) resolve(file)
-            else reject(new Error('gnosis-reader: no file selected'))
-        }
-        fileInput.click()
-    })
+async function fetchOk(url) {
+    console.log(`[cache] fetching ${url}`)
+    const res = await fetch(url)
+    console.log(`[cache] ${res.status} ${res.statusText} <- ${url}`)
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText} fetching ${url}`)
+    return res
 }
 
-async function openBookFromFile(file) {
-    const [{ EPUB }, { configure, ZipReader, BlobReader, TextWriter, BlobWriter }] = await Promise.all([
-        import('./foliate-js/epub.js'),
-        import('./foliate-js/vendor/zip.js'),
-    ])
-    configure({ useWebWorkers: false })
+async function fetchOrNull(url, as) {
+    console.log(`[cache] fetching (optional) ${url}`)
+    try {
+        const res = await fetch(url)
+        console.log(`[cache] ${res.status} ${res.statusText} <- ${url}`)
+        if (!res.ok) return null
+        return as === 'blob' ? await res.arrayBuffer() : await res.text()
+    } catch (err) {
+        console.log(`[cache] ${url} not available (${err}), treating as missing`)
+        return null
+    }
+}
 
-    const zipReader = new ZipReader(new BlobReader(file))
-    const entries = await zipReader.getEntries()
-    const map = new Map(entries.map(entry => [entry.filename, entry]))
-    const load = f => (name, ...args) => map.has(name) ? f(map.get(name), ...args) : null
-    const loadText = load(entry => entry.getData(new TextWriter()))
-    const loadBlob = load((entry, type) => entry.getData(new BlobWriter(type)))
-    const getSize = name => map.get(name)?.uncompressedSize ?? 0
+async function openBookFromCache(bookId) {
+    console.log(`[cache] location.href=${location.href} location.protocol=${location.protocol}`)
+    const origin = `${location.protocol}///`
+    const base = `${origin}book/${bookId}/`
+    console.log(`[cache] opening bookId=${bookId} base=${base}`)
+    const manifest = await fetchOk(`${origin}book-manifest/${bookId}`).then(r => r.json())
+    console.log(`[cache] manifest entries=${Object.keys(manifest).length}`)
+    const { EPUB } = await import('./foliate-js/epub.js')
+    const encode = name => name.split('/').map(encodeURIComponent).join('/')
+    const loadText = name => fetchOrNull(base + encode(name), 'text')
+    const loadBlob = async (name, type) => {
+        const buf = await fetchOrNull(base + encode(name), 'blob')
+        return buf ? new Blob([buf], { type }) : null
+    }
+    const getSize = name => manifest[name] ?? 0
 
     return new EPUB({ loadText, loadBlob, getSize }).init()
 }
@@ -511,20 +520,24 @@ window.gnosisSetStartMode = skipFrontMatter => {
     startAtBodyText = !!skipFrontMatter
 }
 
-window.gnosisOpenBook = async (lastCfi, style) => {
+window.gnosisOpenBook = async (bookId, lastCfi, style) => {
+    console.log(`[cache] gnosisOpenBook bookId=${JSON.stringify(bookId)} lastCfi=${JSON.stringify(lastCfi)}`)
     try {
         if (style) window.gnosisSetStyle(style)
         prefetched = new Set()
         view.close()
-        const file = await pickBookFile()
-        const book = await openBookFromFile(file)
+        console.log('[cache] view.close() done, calling openBookFromCache')
+        const book = await openBookFromCache(bookId)
+        console.log(`[cache] openBookFromCache resolved, title=${book?.metadata?.title}`)
         await view.open(book)
+        console.log('[cache] view.open() resolved')
         pageListTotal = book?.pageList?.length ?? 0
         applyStyle()
         await view.init({
             lastLocation: lastCfi || undefined,
             showTextStart: !lastCfi && startAtBodyText,
         })
+        console.log('[cache] view.init() resolved')
         post({
             type: 'ready',
             title: book?.metadata?.title ?? null,
@@ -533,6 +546,7 @@ window.gnosisOpenBook = async (lastCfi, style) => {
     } catch (err) {
         const message = String((err && err.message) || err)
         const stack = err && err.stack ? String(err.stack) : null
+        console.log(`[cache] gnosisOpenBook FAILED: ${message}\n${stack}`)
         post({ type: 'error', message: stack ? `${message}\n${stack}` : message })
     }
 }

@@ -21,12 +21,17 @@ pub fn collection_covers_dir() -> PathBuf {
     covers_dir().join("collections")
 }
 
+pub fn book_cache_dir() -> PathBuf {
+    data_dir().join("books")
+}
+
 pub fn init_db() -> Result<Connection> {
     let dir = data_dir();
     std::fs::create_dir_all(&dir).context("creating data directory")?;
     std::fs::create_dir_all(covers_dir()).context("creating covers directory")?;
     std::fs::create_dir_all(collection_covers_dir())
         .context("creating collection covers directory")?;
+    std::fs::create_dir_all(book_cache_dir()).context("creating book cache directory")?;
 
     let conn = Connection::open(dir.join("library.db")).context("opening library database")?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
@@ -179,4 +184,3 @@ pub fn all_collection_covers(conn: &Connection, kind: &str) -> Result<HashMap<St
     rows.collect::<rusqlite::Result<HashMap<_, _>>>()
         .context("listing collection covers")
 }
-

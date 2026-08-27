@@ -1,5 +1,4 @@
 use std::cell::{Cell, RefCell};
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -20,7 +19,6 @@ pub struct ReaderWidgets {
     pub web_view: webkit6::WebView,
     pub title_widget: adw::WindowTitle,
     pub toc_menu: gio::Menu,
-    pub current_book: Rc<RefCell<Option<PathBuf>>>,
     pub current_book_id: Rc<RefCell<Option<Uuid>>>,
     pub apply_prefs: Rc<dyn Fn(&ReaderPrefs)>,
     pub spinner: SpinnerHandle,
@@ -97,7 +95,6 @@ struct TocEntry {
 }
 
 pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
-    let current_book: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
     let current_book_id: Rc<RefCell<Option<Uuid>>> = Rc::new(RefCell::new(None));
 
     let context = webkit6::WebContext::default().unwrap_or_else(webkit6::WebContext::new);
@@ -131,17 +128,6 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
         .visible(false)
         .build();
     let spinner = SpinnerHandle::new(spinner_widget.clone());
-
-    let current_book_for_chooser = current_book.clone();
-    web_view.connect_run_file_chooser(move |_, request| {
-        match current_book_for_chooser.borrow().as_ref().and_then(|p| p.to_str()) {
-            Some(path) => {
-                request.select_files(&[path]);
-                true
-            }
-            None => false,
-        }
-    });
 
     let web_view_for_restore = web_view.clone();
     let restore_script = initial_style_script(&ReaderPrefs::default());
@@ -379,7 +365,6 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
         web_view,
         title_widget,
         toc_menu,
-        current_book,
         current_book_id,
         apply_prefs,
         spinner,
@@ -702,7 +687,8 @@ fn initial_style_script(prefs: &ReaderPrefs) -> String {
     )
 }
 
-pub fn open_book_script(resume_cfi: Option<&str>, prefs: &ReaderPrefs) -> String {
+pub fn open_book_script(book_id: Uuid, resume_cfi: Option<&str>, prefs: &ReaderPrefs) -> String {
+    let id_json = serde_json::to_string(&book_id.to_string()).unwrap_or_else(|_| "\"\"".to_string());
     let cfi_json = resume_cfi
         .map(|cfi| serde_json::to_string(cfi).unwrap_or_else(|_| "null".to_string()))
         .unwrap_or_else(|| "null".to_string());
@@ -714,7 +700,7 @@ pub fn open_book_script(resume_cfi: Option<&str>, prefs: &ReaderPrefs) -> String
     });
     format!(
         "(function poll() {{ \
-            if (window.gnosisOpenBook) window.gnosisOpenBook({cfi_json}, {style_json}); \
+            if (window.gnosisOpenBook) window.gnosisOpenBook({id_json}, {cfi_json}, {style_json}); \
             else setTimeout(poll, 20); \
         }})();"
     )

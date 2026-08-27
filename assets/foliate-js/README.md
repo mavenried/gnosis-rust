@@ -14,9 +14,13 @@ OPDS, a dictionary popup, and TTS, none of which Gnosis uses):
   modules `view.js` depends on directly.
 - `search.js` — matcher behind `view.search()`, dynamically imported by
   `view.js` only when search actually runs.
-- `vendor/zip.js`, `vendor/fflate.js` — bundled zip reading, used by
-  `epub.js` to read the EPUB (itself a zip archive) directly from bytes.
 
-Not modified from upstream. `assets/reader.html` / `assets/reader.js` are
-Gnosis's own glue code that loads `view.js` and bridges it to the native
-side over `window.webkit.messageHandlers`.
+Not modified from upstream. `view.js`'s own `makeBook()` (generic file-type
+detection, zip/PDF/MOBI/directory loaders) is unused — Gnosis unpacks each
+EPUB to disk on import (`src/library/scanner.rs`) and constructs the
+`EPUB` loader itself from plain files served over a custom URI scheme
+(`assets/reader.js`'s `openBookFromCache`), so `vendor/zip.js` and
+`vendor/fflate.js` (upstream's in-browser zip/MOBI readers, only reachable
+through `makeBook()`) aren't vendored. `assets/reader.html` /
+`assets/reader.js` are Gnosis's own glue code that loads `view.js` and
+bridges it to the native side over `window.webkit.messageHandlers`.

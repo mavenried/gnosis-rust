@@ -800,6 +800,11 @@ impl GnosisWindow {
             return;
         }
 
+        let _ = std::fs::remove_dir_all(library::db::book_cache_dir().join(id.to_string()));
+        let _ = std::fs::remove_file(
+            library::db::book_cache_dir().join(format!("{id}.json")),
+        );
+
         if let Some(store) = self.imp().store.get() {
             store.remove(index);
         }
@@ -1014,9 +1019,14 @@ impl GnosisWindow {
             let Some(book_object) = store.item(*index).and_downcast::<BookObject>() else {
                 continue;
             };
-            if library::db::delete_book(&db.borrow(), book_object.book().id).is_err() {
+            let removed_id = book_object.book().id;
+            if library::db::delete_book(&db.borrow(), removed_id).is_err() {
                 continue;
             }
+            let _ = std::fs::remove_dir_all(library::db::book_cache_dir().join(removed_id.to_string()));
+            let _ = std::fs::remove_file(
+                library::db::book_cache_dir().join(format!("{removed_id}.json")),
+            );
             store.remove(*index);
             removed += 1;
             let message = match reason {
@@ -1345,17 +1355,24 @@ impl GnosisWindow {
             return;
         };
 
-        *reader.current_book.borrow_mut() = Some(book.path.clone());
         *reader.current_book_id.borrow_mut() = Some(book.id);
         *imp.reader_book_id.borrow_mut() = Some(book.id);
         reader.title_widget.set_title(&book.title);
         reader.toc_menu.remove_all();
 
+        let cache_dir = library::db::book_cache_dir().join(book.id.to_string());
+        if !cache_dir.exists()
+            && let Err(err) = library::scanner::unpack_book(book.id, &book.path)
+        {
+            self.show_reader_error(&format!("Couldn't open book: {err}"));
+            return;
+        }
+
         let prefs = library::reader_prefs::load_for(book.id);
         (reader.apply_prefs)(&prefs);
 
         reader.spinner.show_soon();
-        let script = super::reader::open_book_script(book.locator.as_deref(), &prefs);
+        let script = super::reader::open_book_script(book.id, book.locator.as_deref(), &prefs);
         reader
             .web_view
             .evaluate_javascript(&script, None, None, gio::Cancellable::NONE, |_| {});
