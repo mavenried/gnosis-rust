@@ -126,6 +126,8 @@ function wrapSection(section) {
 const PREFETCH_RADIUS = 2
 let prefetched = new Set()
 let prewarmed = new Set()
+let prewarmGeneration = 0
+let lastDirection = 1
 view.addEventListener('load', ({ detail }) => {
     mark('section load event')
     const sections = view.book?.sections
@@ -146,11 +148,19 @@ view.addEventListener('load', ({ detail }) => {
     }
 
     const neighbors = new Set()
-    if (idx - 1 >= 0) neighbors.add(idx - 1)
-    if (idx + 1 < sections.length) neighbors.add(idx + 1)
+    const first = idx + lastDirection
+    const second = idx - lastDirection
+    if (first >= 0 && first < sections.length) neighbors.add(first)
+    if (second >= 0 && second < sections.length) neighbors.add(second)
     for (const i of prewarmed) if (!neighbors.has(i)) view.renderer?.dropPrewarm?.(i)
     prewarmed = neighbors
-    for (const i of prewarmed) view.renderer?.prewarm?.(i)
+    const generation = ++prewarmGeneration
+    ;(async () => {
+        for (const i of neighbors) {
+            if (generation !== prewarmGeneration) return
+            await view.renderer?.prewarm?.(i)
+        }
+    })()
 })
 
 view.addEventListener('relocate', e => {
@@ -199,9 +209,12 @@ const THEMES = {
     dark: { bg: '#222222', fg: '#e0e0e0', link: '#77bbee' },
 }
 
-let currentStyle = { theme: 'light', fontFamily: null, fontSize: 100 }
+let currentStyle = {
+    theme: 'light', fontFamily: null, fontSize: 100,
+    lineHeight: 140, paragraphSpacing: 100, margin: 48, justify: false,
+}
 
-function buildCSS({ theme, fontFamily, fontSize }) {
+function buildCSS({ theme, fontFamily, fontSize, lineHeight, paragraphSpacing, justify }) {
     const { bg, fg, link } = THEMES[theme] ?? THEMES.light
     return `
         html, body {
@@ -223,11 +236,24 @@ function buildCSS({ theme, fontFamily, fontSize }) {
         html {
             font-size: ${fontSize || 100}% !important;
         }
+        html, body, p, div, li, td, th, blockquote {
+            line-height: ${(lineHeight || 140) / 100} !important;
+        }
+        p {
+            margin-bottom: ${(paragraphSpacing ?? 100) / 100}em !important;
+        }
+        ${justify ? `
+        p, div {
+            text-align: justify !important;
+        }` : ''}
     `
 }
 
 function applyStyle() {
     view.renderer?.setStyles?.(buildCSS(currentStyle))
+    // margin is foliate's own attribute (controls the paginator's page
+    // width/side padding), not something injected into the book's CSS
+    view.renderer?.setAttribute('margin', `${currentStyle.margin ?? 48}px`)
     const { bg, fg } = THEMES[currentStyle.theme] ?? THEMES.light
     document.body.style.background = bg
     footerEl.style.color = fg
@@ -588,6 +614,7 @@ window.gnosisOpenBook = async (bookId, lastCfi, style) => {
         const book = await openBookFromCache(bookId)
         console.log(`[cache] openBookFromCache resolved, title=${book?.metadata?.title}`)
         await view.open(book)
+        view.renderer?.setAttribute('animated', '')
         console.log('[cache] view.open() resolved')
         pageListTotal = book?.pageList?.length ?? 0
         tocListEl.replaceChildren()
@@ -610,15 +637,71 @@ window.gnosisOpenBook = async (bookId, lastCfi, style) => {
     }
 }
 
+function afterPaint(fn) {
+    requestAnimationFrame(() => requestAnimationFrame(fn))
+}
+
+function markPainted(label) {
+    afterPaint(() => {
+        mark(label)
+        console.log(`[timing] ${label} wallclock=${new Date().toISOString()}`)
+    })
+}
+
+// Only dim/slide the page if the turn is still pending after this long, so
+// fast (prewarmed) turns stay instant and undimmed. Mirrors SpinnerHandle's
+// show_soon delay in src/ui/reader.rs.
+const TURNING_DELAY_MS = 150
+
+// True if the upcoming next()/prev() call is expected to leave the current
+// section (and thus may need to load new content), based on the paginator's
+// current position. A same-chapter page turn never needs the loading mask.
+function willCrossSection(dir) {
+    const r = view.renderer
+    if (!r) return false
+    if (r.scrolled) return dir < 0 ? r.start <= 0 : r.viewSize - r.end <= 2
+    return dir < 0 ? r.page - 1 <= 0 : r.page + 1 >= r.pages - 1
+}
+
+function withTurning(cls, promise) {
+    let shown = false
+    const timer = setTimeout(() => {
+        shown = true
+        view.classList.add(cls)
+    }, TURNING_DELAY_MS)
+    return promise.finally(() => {
+        clearTimeout(timer)
+        if (shown) afterPaint(() => view.classList.remove(cls))
+    })
+}
+
 window.gnosisNext = () => {
+    console.log(`[timing] next() JS START wallclock=${new Date().toISOString()}`)
     markStart = 0
     mark('next() called')
-    return view.next().then(() => mark('next() resolved'))
+    lastDirection = 1
+    const crossing = willCrossSection(1)
+    // only the native spinner (driven by this message) for turns that may
+    // actually need to load a new chapter; same-chapter turns never spinner.
+    if (crossing) post({ type: 'loading' })
+    const promise = view.next()
+    return (crossing ? withTurning('turning-next', promise) : promise).then(() => {
+        mark('next() resolved')
+        markPainted('next() painted')
+    })
 }
 window.gnosisPrev = () => {
+    console.log(`[timing] prev() JS START wallclock=${new Date().toISOString()}`)
     markStart = 0
     mark('prev() called')
-    return view.prev().then(() => mark('prev() resolved'))
+    lastDirection = -1
+    const crossing = willCrossSection(-1)
+    if (crossing) post({ type: 'loading' })
+    const promise = view.prev()
+    return (crossing ? withTurning('turning-prev', promise) : promise).then(() => {
+        mark('prev() resolved')
+        markPainted('prev() painted')
+    })
 }
 window.gnosisScrollBy = (dx, dy) => view.renderer?.scrollBy(dx, dy)
 window.gnosisSnap = (vx, vy) => view.renderer?.snap(vx, vy)

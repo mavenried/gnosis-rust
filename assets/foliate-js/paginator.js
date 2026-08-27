@@ -252,7 +252,9 @@ class View {
     }
     async load(src, afterLoad, beforeRender) {
         if (typeof src !== 'string') throw new Error(`${src} is not string`)
-        window.gnosisMark?.(`View.load: src assigned (len=${src.length})`)
+        window.gnosisMark?.(`View.load: fetching content (src len=${src.length})`)
+        const html = await fetch(src).then(r => r.text())
+        window.gnosisMark?.(`View.load: content fetched (len=${html.length})`)
         return new Promise(resolve => {
             this.#iframe.addEventListener('load', () => {
                 window.gnosisMark?.('View.load: iframe onload fired')
@@ -284,7 +286,10 @@ class View {
 
                 resolve()
             }, { once: true })
-            this.#iframe.src = src
+            const doc = this.#iframe.contentDocument
+            doc.open()
+            doc.write(html)
+            doc.close()
         })
     }
     render(layout) {
@@ -773,18 +778,18 @@ export class Paginator extends HTMLElement {
         return { height, width, margin, gap, columnWidth }
     }
     prewarm(index) {
-        if (index === this.#index || this.#pool.has(index)) return
-        if (!this.#canGoToIndex(index)) return
+        if (index === this.#index || this.#pool.has(index)) return Promise.resolve()
+        if (!this.#canGoToIndex(index)) return Promise.resolve()
         const section = this.sections[index]
-        if (!section || section.linear === 'no') return
-        Promise.resolve(section.load()).then(src => {
+        if (!section || section.linear === 'no') return Promise.resolve()
+        return Promise.resolve(section.load()).then(src => {
             if (!src || index === this.#index || this.#pool.has(index)) return
             const view = new View({ container: this, onExpand: () => {} })
             const rect = this.#container.getBoundingClientRect()
             Object.assign(view.element.style, {
-                position: 'absolute', top: '0', left: '0',
+                position: 'absolute', top: '0', left: '-100000px',
                 width: `${rect.width}px`, height: `${rect.height}px`,
-                visibility: 'hidden', pointerEvents: 'none',
+                pointerEvents: 'none',
             })
             this.#container.append(view.element)
             const afterLoad = doc => {
@@ -804,7 +809,7 @@ export class Paginator extends HTMLElement {
                 }
             }
             const beforeRender = ({ vertical }) => this.#computeLayoutFor(vertical)
-            view.load(src, afterLoad, beforeRender).then(() => {
+            return view.load(src, afterLoad, beforeRender).then(() => {
                 if (this.#pool.get(index) !== undefined || index === this.#index) {
                     view.destroy()
                     view.element.remove()
@@ -1058,7 +1063,7 @@ export class Paginator extends HTMLElement {
             }
             Object.assign(pooled.element.style, {
                 position: 'relative', top: '', left: '',
-                visibility: '', pointerEvents: '',
+                pointerEvents: '',
             })
             this.#view = pooled
             const doc = pooled.document

@@ -14,10 +14,33 @@ pub struct ReaderPrefs {
     pub font_size: i32,
     #[serde(default = "default_rsvp_wpm")]
     pub rsvp_wpm: u32,
+    /// Percentage of a 1x line-height (e.g. 140 = 1.4).
+    #[serde(default = "default_line_height")]
+    pub line_height: i32,
+    /// Percentage of 1em of space below each paragraph.
+    #[serde(default = "default_paragraph_spacing")]
+    pub paragraph_spacing: i32,
+    /// Page side margin, in pixels.
+    #[serde(default = "default_margin")]
+    pub margin: i32,
+    #[serde(default)]
+    pub justify: bool,
 }
 
 fn default_rsvp_wpm() -> u32 {
     300
+}
+
+fn default_line_height() -> i32 {
+    140
+}
+
+fn default_paragraph_spacing() -> i32 {
+    100
+}
+
+fn default_margin() -> i32 {
+    48
 }
 
 impl Default for ReaderPrefs {
@@ -27,6 +50,10 @@ impl Default for ReaderPrefs {
             font_family: None,
             font_size: 100,
             rsvp_wpm: default_rsvp_wpm(),
+            line_height: default_line_height(),
+            paragraph_spacing: default_paragraph_spacing(),
+            margin: default_margin(),
+            justify: false,
         }
     }
 }

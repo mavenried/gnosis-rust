@@ -192,10 +192,13 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
         );
     });
 
+    // The spinner for next/prev is driven entirely by JS's `loading` message
+    // (sent only when the turn will cross a chapter boundary and may need to
+    // load new content) rather than triggered here unconditionally, since a
+    // same-chapter turn is just foliate's own animation, not a real wait.
     let web_view_for_prev = web_view.clone();
-    let spinner_for_prev = spinner.clone();
     prev_button.connect_clicked(move |_| {
-        spinner_for_prev.show_soon();
+        tracing::info!("dispatching prev_script (button)");
         web_view_for_prev.evaluate_javascript(
             &prev_script(),
             None,
@@ -205,9 +208,8 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
         );
     });
     let web_view_for_next = web_view.clone();
-    let spinner_for_next = spinner.clone();
     next_button.connect_clicked(move |_| {
-        spinner_for_next.show_soon();
+        tracing::info!("dispatching next_script (button)");
         web_view_for_next.evaluate_javascript(
             &next_script(),
             None,
@@ -220,7 +222,6 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
     let key_controller = gtk::EventControllerKey::new();
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
     let web_view_for_keys = web_view.clone();
-    let spinner_for_keys = spinner.clone();
     key_controller.connect_key_pressed(move |_, keyval, _keycode, state| {
         if keyval == gtk::gdk::Key::f && state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
             web_view_for_keys.evaluate_javascript(
@@ -234,7 +235,7 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
         }
         match keyval {
             gtk::gdk::Key::Left | gtk::gdk::Key::Page_Up => {
-                spinner_for_keys.show_soon();
+                tracing::info!("dispatching prev_script (key)");
                 web_view_for_keys.evaluate_javascript(
                     &prev_script(),
                     None,
@@ -245,7 +246,7 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
                 glib::Propagation::Stop
             }
             gtk::gdk::Key::Right | gtk::gdk::Key::Page_Down | gtk::gdk::Key::space => {
-                spinner_for_keys.show_soon();
+                tracing::info!("dispatching next_script (key)");
                 web_view_for_keys.evaluate_javascript(
                     &next_script(),
                     None,
@@ -384,6 +385,25 @@ fn build_display_settings(
         gtk::Adjustment::new(prefs.font_size as f64, 50.0, 300.0, 10.0, 10.0, 0.0);
     let font_size_spin = gtk::SpinButton::new(Some(&font_size_adjustment), 1.0, 0);
 
+    let line_height_adjustment =
+        gtk::Adjustment::new(prefs.line_height as f64, 100.0, 250.0, 10.0, 10.0, 0.0);
+    let line_height_spin = gtk::SpinButton::new(Some(&line_height_adjustment), 1.0, 0);
+
+    let paragraph_spacing_adjustment =
+        gtk::Adjustment::new(prefs.paragraph_spacing as f64, 0.0, 300.0, 10.0, 10.0, 0.0);
+    let paragraph_spacing_spin =
+        gtk::SpinButton::new(Some(&paragraph_spacing_adjustment), 1.0, 0);
+
+    let margin_adjustment = gtk::Adjustment::new(prefs.margin as f64, 0.0, 160.0, 8.0, 8.0, 0.0);
+    let margin_spin = gtk::SpinButton::new(Some(&margin_adjustment), 1.0, 0);
+
+    let justify_switch = gtk::Switch::builder()
+        .valign(gtk::Align::Center)
+        .halign(gtk::Align::Start)
+        .active(prefs.justify)
+        .tooltip_text("Justify body text")
+        .build();
+
     let skip_front_matter_switch = gtk::Switch::builder()
         .valign(gtk::Align::Center)
         .halign(gtk::Align::Start)
@@ -414,8 +434,16 @@ fn build_display_settings(
     grid.attach(&font_row, 1, 1, 1, 1);
     grid.attach(&label("Font Size"), 0, 2, 1, 1);
     grid.attach(&font_size_spin, 1, 2, 1, 1);
-    grid.attach(&label("Skip to First Chapter"), 0, 3, 1, 1);
-    grid.attach(&skip_front_matter_switch, 1, 3, 1, 1);
+    grid.attach(&label("Line Spacing"), 0, 3, 1, 1);
+    grid.attach(&line_height_spin, 1, 3, 1, 1);
+    grid.attach(&label("Paragraph Spacing"), 0, 4, 1, 1);
+    grid.attach(&paragraph_spacing_spin, 1, 4, 1, 1);
+    grid.attach(&label("Margins"), 0, 5, 1, 1);
+    grid.attach(&margin_spin, 1, 5, 1, 1);
+    grid.attach(&label("Justify Text"), 0, 6, 1, 1);
+    grid.attach(&justify_switch, 1, 6, 1, 1);
+    grid.attach(&label("Skip to First Chapter"), 0, 7, 1, 1);
+    grid.attach(&skip_front_matter_switch, 1, 7, 1, 1);
 
     let popover = gtk::Popover::builder().child(&grid).build();
     let display_button = gtk::MenuButton::builder()
@@ -465,7 +493,11 @@ fn build_display_settings(
 
         if dx.abs() > dy.abs() {
             swipe_active_for_scroll.set(true);
-            const SCROLL_PIXELS_PER_UNIT: f64 = 40.0;
+            // foliate's own paginator caps a live drag to one page width in
+            // either direction, so a high multiplier here just means a light
+            // brush of the trackpad is enough to hit that cap and flip the
+            // page. Keep this low so a full page turn takes a deliberate swipe.
+            const SCROLL_PIXELS_PER_UNIT: f64 = 10.0;
             let (px, py) = (dx * SCROLL_PIXELS_PER_UNIT, dy * SCROLL_PIXELS_PER_UNIT);
             let script = format!("window.gnosisScrollBy && window.gnosisScrollBy({px}, {py});");
             web_view_for_swipe.evaluate_javascript(
@@ -515,71 +547,64 @@ fn build_display_settings(
     });
     web_view.add_controller(scroll_controller);
 
-    let web_view_for_theme = web_view.clone();
-    let publisher_font_for_theme = publisher_font_check.clone();
-    let font_button_for_theme = font_button.clone();
-    let font_size_for_theme = font_size_spin.clone();
-    let current_book_id_for_theme = current_book_id.clone();
-    theme_dropdown.connect_selected_notify(move |dropdown| {
-        push_reader_style(
-            &web_view_for_theme,
-            dropdown,
-            &publisher_font_for_theme,
-            &font_button_for_theme,
-            &font_size_for_theme,
-            &current_book_id_for_theme,
-        );
-    });
+    let push_style: Rc<dyn Fn()> = {
+        let web_view = web_view.clone();
+        let theme_dropdown = theme_dropdown.clone();
+        let publisher_font_check = publisher_font_check.clone();
+        let font_button = font_button.clone();
+        let font_size_spin = font_size_spin.clone();
+        let line_height_spin = line_height_spin.clone();
+        let paragraph_spacing_spin = paragraph_spacing_spin.clone();
+        let margin_spin = margin_spin.clone();
+        let justify_switch = justify_switch.clone();
+        let current_book_id = current_book_id.clone();
+        Rc::new(move || {
+            push_reader_style(
+                &web_view,
+                &theme_dropdown,
+                &publisher_font_check,
+                &font_button,
+                &font_size_spin,
+                &line_height_spin,
+                &paragraph_spacing_spin,
+                &margin_spin,
+                &justify_switch,
+                &current_book_id,
+            );
+        })
+    };
 
-    let web_view_for_publisher = web_view.clone();
-    let theme_for_publisher = theme_dropdown.clone();
+    let push_style_for_theme = push_style.clone();
+    theme_dropdown.connect_selected_notify(move |_| push_style_for_theme());
+
     let font_button_for_publisher = font_button.clone();
-    let font_size_for_publisher = font_size_spin.clone();
-    let current_book_id_for_publisher = current_book_id.clone();
+    let push_style_for_publisher = push_style.clone();
     publisher_font_check.connect_toggled(move |check| {
         font_button_for_publisher.set_sensitive(!check.is_active());
-        push_reader_style(
-            &web_view_for_publisher,
-            &theme_for_publisher,
-            check,
-            &font_button_for_publisher,
-            &font_size_for_publisher,
-            &current_book_id_for_publisher,
-        );
+        push_style_for_publisher();
     });
 
-    let web_view_for_font = web_view.clone();
-    let theme_for_font = theme_dropdown.clone();
     let publisher_font_for_font = publisher_font_check.clone();
-    let font_size_for_font = font_size_spin.clone();
-    let current_book_id_for_font = current_book_id.clone();
-    font_button.connect_font_desc_notify(move |button| {
+    let push_style_for_font = push_style.clone();
+    font_button.connect_font_desc_notify(move |_| {
         publisher_font_for_font.set_active(false);
-        push_reader_style(
-            &web_view_for_font,
-            &theme_for_font,
-            &publisher_font_for_font,
-            button,
-            &font_size_for_font,
-            &current_book_id_for_font,
-        );
+        push_style_for_font();
     });
 
-    let web_view_for_size = web_view.clone();
-    let theme_for_size = theme_dropdown.clone();
-    let publisher_font_for_size = publisher_font_check.clone();
-    let font_button_for_size = font_button.clone();
-    let current_book_id_for_size = current_book_id.clone();
-    font_size_spin.connect_value_changed(move |spin| {
-        push_reader_style(
-            &web_view_for_size,
-            &theme_for_size,
-            &publisher_font_for_size,
-            &font_button_for_size,
-            spin,
-            &current_book_id_for_size,
-        );
-    });
+    let push_style_for_size = push_style.clone();
+    font_size_spin.connect_value_changed(move |_| push_style_for_size());
+
+    let push_style_for_line_height = push_style.clone();
+    line_height_spin.connect_value_changed(move |_| push_style_for_line_height());
+
+    let push_style_for_paragraph_spacing = push_style.clone();
+    paragraph_spacing_spin.connect_value_changed(move |_| push_style_for_paragraph_spacing());
+
+    let push_style_for_margin = push_style.clone();
+    margin_spin.connect_value_changed(move |_| push_style_for_margin());
+
+    let push_style_for_justify = push_style.clone();
+    justify_switch.connect_active_notify(move |_| push_style_for_justify());
 
     let web_view_for_start_mode = web_view.clone();
     skip_front_matter_switch.connect_active_notify(move |switch| {
@@ -609,17 +634,26 @@ fn build_display_settings(
             }
         }
         font_size_spin.set_value(prefs.font_size as f64);
+        line_height_spin.set_value(prefs.line_height as f64);
+        paragraph_spacing_spin.set_value(prefs.paragraph_spacing as f64);
+        margin_spin.set_value(prefs.margin as f64);
+        justify_switch.set_active(prefs.justify);
     });
 
     (display_button, apply_prefs, popover)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_reader_style(
     web_view: &webkit6::WebView,
     theme_dropdown: &gtk::DropDown,
     publisher_font_check: &gtk::CheckButton,
     font_button: &gtk::FontDialogButton,
     font_size_spin: &gtk::SpinButton,
+    line_height_spin: &gtk::SpinButton,
+    paragraph_spacing_spin: &gtk::SpinButton,
+    margin_spin: &gtk::SpinButton,
+    justify_switch: &gtk::Switch,
     current_book_id: &Rc<RefCell<Option<Uuid>>>,
 ) {
     let theme = THEME_NAMES
@@ -634,6 +668,10 @@ fn push_reader_style(
             .and_then(|desc| desc.family().map(|f| f.to_string()))
     };
     let font_size = font_size_spin.value_as_int();
+    let line_height = line_height_spin.value_as_int();
+    let paragraph_spacing = paragraph_spacing_spin.value_as_int();
+    let margin = margin_spin.value_as_int();
+    let justify = justify_switch.is_active();
 
     if let Some(id) = *current_book_id.borrow() {
         let rsvp_wpm = library::reader_prefs::load_for(id).rsvp_wpm;
@@ -644,6 +682,10 @@ fn push_reader_style(
                 font_family: font_family.clone(),
                 font_size,
                 rsvp_wpm,
+                line_height,
+                paragraph_spacing,
+                margin,
+                justify,
             },
         );
     }
@@ -652,18 +694,30 @@ fn push_reader_style(
         "theme": theme,
         "fontFamily": font_family,
         "fontSize": font_size,
+        "lineHeight": line_height,
+        "paragraphSpacing": paragraph_spacing,
+        "margin": margin,
+        "justify": justify,
     });
     let script = format!("window.gnosisSetStyle({style});");
     web_view.evaluate_javascript(&script, None, None, gio::Cancellable::NONE, |_| {});
 }
 
-fn initial_style_script(prefs: &ReaderPrefs) -> String {
-    let style = serde_json::json!({
+fn style_json(prefs: &ReaderPrefs) -> serde_json::Value {
+    serde_json::json!({
         "theme": prefs.theme,
         "fontFamily": prefs.font_family,
         "fontSize": prefs.font_size,
         "rsvpWpm": prefs.rsvp_wpm,
-    });
+        "lineHeight": prefs.line_height,
+        "paragraphSpacing": prefs.paragraph_spacing,
+        "margin": prefs.margin,
+        "justify": prefs.justify,
+    })
+}
+
+fn initial_style_script(prefs: &ReaderPrefs) -> String {
+    let style = style_json(prefs);
     format!(
         "(function poll() {{ \
             if (window.gnosisSetStyle) window.gnosisSetStyle({style}); \
@@ -677,12 +731,7 @@ pub fn open_book_script(book_id: Uuid, resume_cfi: Option<&str>, prefs: &ReaderP
     let cfi_json = resume_cfi
         .map(|cfi| serde_json::to_string(cfi).unwrap_or_else(|_| "null".to_string()))
         .unwrap_or_else(|| "null".to_string());
-    let style_json = serde_json::json!({
-        "theme": prefs.theme,
-        "fontFamily": prefs.font_family,
-        "fontSize": prefs.font_size,
-        "rsvpWpm": prefs.rsvp_wpm,
-    });
+    let style_json = style_json(prefs);
     format!(
         "(function poll() {{ \
             if (window.gnosisOpenBook) window.gnosisOpenBook({id_json}, {cfi_json}, {style_json}); \
