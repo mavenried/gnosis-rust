@@ -1,5 +1,5 @@
 [package]
-name = "gnosis"
+name = "gnosis-rust"
 version = "0.1.3"
 edition = "2024"
 

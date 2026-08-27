@@ -538,7 +538,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "gnosis"
+name = "gnosis-rust"
 version = "0.1.3"
 dependencies = [
  "anyhow",
