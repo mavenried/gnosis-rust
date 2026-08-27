@@ -98,7 +98,7 @@
     top: 16px;
     right: 16px;
   }
-  #search-panel {
+  .side-panel {
     display: none;
     position: fixed;
     top: 0;
@@ -112,14 +112,18 @@
     font-size: 13px;
     box-shadow: -4px 0 12px rgba(0, 0, 0, 0.15);
   }
-  #search-panel.visible {
+  .side-panel.visible {
     display: flex;
   }
-  #search-header {
+  .panel-header {
     display: flex;
     align-items: center;
     gap: 6px;
     padding: 10px;
+  }
+  .panel-title {
+    flex: 1 1 auto;
+    font-weight: 600;
   }
   #search-input {
     flex: 1 1 auto;
@@ -131,7 +135,7 @@
     color: inherit;
     min-width: 0;
   }
-  #search-close {
+  .panel-close {
     font: inherit;
     border: none;
     background: transparent;
@@ -163,7 +167,8 @@
     padding: 0 10px 8px;
     opacity: 0.6;
   }
-  #search-results {
+  #search-results,
+  #toc-list {
     flex: 1 1 auto;
     overflow-y: auto;
     border-top: 1px solid currentColor;
@@ -173,7 +178,7 @@
     font-weight: 600;
     opacity: 0.7;
   }
-  .search-result {
+  .panel-item {
     display: block;
     width: 100%;
     text-align: left;
@@ -185,7 +190,7 @@
     cursor: pointer;
     line-height: 1.4;
   }
-  .search-result:hover {
+  .panel-item:hover {
     background: rgba(128, 128, 128, 0.15);
   }
   .search-result mark {
@@ -212,10 +217,17 @@
   </div>
   <button id="rsvp-close">&times;</button>
 </div>
-<div id="search-panel">
-  <div id="search-header">
+<div id="toc-panel" class="side-panel">
+  <div class="panel-header">
+    <span class="panel-title">Table of Contents</span>
+    <button id="toc-close" class="panel-close">&times;</button>
+  </div>
+  <div id="toc-list"></div>
+</div>
+<div id="search-panel" class="side-panel">
+  <div class="panel-header">
     <input type="text" id="search-input" placeholder="Search…">
-    <button id="search-close">&times;</button>
+    <button id="search-close" class="panel-close">&times;</button>
   </div>
   <div id="search-scope">
     <button id="search-scope-book" class="active">Whole Book</button>

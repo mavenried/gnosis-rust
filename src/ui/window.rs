@@ -481,30 +481,6 @@ impl GnosisWindow {
     }
 
     fn setup_actions(&self) {
-        let reader_goto_action =
-            gio::SimpleAction::new("reader-goto", Some(glib::VariantTy::STRING));
-        let window_weak = self.downgrade();
-        reader_goto_action.connect_activate(move |_, parameter| {
-            let Some(window) = window_weak.upgrade() else {
-                return;
-            };
-            let Some(href) = parameter.and_then(glib::Variant::str) else {
-                return;
-            };
-            if let Some(reader) = window.imp().reader.get() {
-                reader.spinner.show_soon();
-                let script = super::reader::goto_script(href);
-                reader.web_view.evaluate_javascript(
-                    &script,
-                    None,
-                    None,
-                    gio::Cancellable::NONE,
-                    |_| {},
-                );
-            }
-        });
-        self.add_action(&reader_goto_action);
-
         let add_book_action = gio::SimpleAction::new("add-book", None);
         let window_weak = self.downgrade();
         add_book_action.connect_activate(move |_, _| {
@@ -1358,7 +1334,6 @@ impl GnosisWindow {
         *reader.current_book_id.borrow_mut() = Some(book.id);
         *imp.reader_book_id.borrow_mut() = Some(book.id);
         reader.title_widget.set_title(&book.title);
-        reader.toc_menu.remove_all();
 
         let cache_dir = library::db::book_cache_dir().join(book.id.to_string());
         if !cache_dir.exists()

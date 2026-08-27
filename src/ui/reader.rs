@@ -18,7 +18,6 @@ pub struct ReaderWidgets {
     pub page: adw::NavigationPage,
     pub web_view: webkit6::WebView,
     pub title_widget: adw::WindowTitle,
-    pub toc_menu: gio::Menu,
     pub current_book_id: Rc<RefCell<Option<Uuid>>>,
     pub apply_prefs: Rc<dyn Fn(&ReaderPrefs)>,
     pub spinner: SpinnerHandle,
@@ -72,8 +71,6 @@ enum ReaderMessage {
     Loading,
     Ready {
         title: Option<String>,
-        #[serde(default)]
-        toc: Vec<TocEntry>,
     },
     Relocate {
         cfi: Option<String>,
@@ -85,13 +82,6 @@ enum ReaderMessage {
     Error {
         message: String,
     },
-}
-
-#[derive(Deserialize)]
-struct TocEntry {
-    label: String,
-    href: String,
-    depth: u32,
 }
 
 pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
@@ -145,12 +135,18 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
     web_view.load_uri(&format!("{}:///shell/reader.html", reader_scheme::SCHEME));
 
     let title_widget = adw::WindowTitle::new("", "");
-    let toc_menu = gio::Menu::new();
-    let toc_button = gtk::MenuButton::builder()
-        .icon_name("view-list-symbolic")
-        .tooltip_text("Table of Contents")
-        .menu_model(&toc_menu)
-        .build();
+    let toc_button = gtk::Button::from_icon_name("view-list-symbolic");
+    toc_button.set_tooltip_text(Some("Table of Contents"));
+    let web_view_for_toc = web_view.clone();
+    toc_button.connect_clicked(move |_| {
+        web_view_for_toc.evaluate_javascript(
+            "window.gnosisToggleToc && window.gnosisToggleToc();",
+            None,
+            None,
+            gio::Cancellable::NONE,
+            |_| {},
+        );
+    });
 
     let (display_button, apply_prefs, display_popover) =
         build_display_settings(&web_view, current_book_id.clone());
@@ -313,7 +309,6 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
 
     let parent_weak = parent.downgrade();
     let title_widget_for_msg = title_widget.clone();
-    let toc_menu_for_msg = toc_menu.clone();
     let current_book_id_for_msg = current_book_id.clone();
     let spinner_for_msg = spinner.clone();
     content_manager.connect_script_message_received(Some("gnosis"), move |_, value| {
@@ -327,19 +322,10 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
             ReaderMessage::Loading => {
                 spinner_for_msg.show_soon();
             }
-            ReaderMessage::Ready { title, toc } => {
+            ReaderMessage::Ready { title } => {
                 spinner_for_msg.hide();
                 if let Some(title) = title {
                     title_widget_for_msg.set_title(&title);
-                }
-                toc_menu_for_msg.remove_all();
-                for entry in toc {
-                    let indent = "\u{2003}".repeat(entry.depth as usize);
-                    let target = glib::Variant::from(entry.href.as_str()).print(false);
-                    toc_menu_for_msg.append(
-                        Some(&format!("{indent}{}", entry.label)),
-                        Some(&format!("win.reader-goto({target})")),
-                    );
                 }
             }
             ReaderMessage::Relocate { cfi, fraction } => {
@@ -364,7 +350,6 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
         page,
         web_view,
         title_widget,
-        toc_menu,
         current_book_id,
         apply_prefs,
         spinner,
@@ -704,11 +689,6 @@ pub fn open_book_script(book_id: Uuid, resume_cfi: Option<&str>, prefs: &ReaderP
             else setTimeout(poll, 20); \
         }})();"
     )
-}
-
-pub fn goto_script(href: &str) -> String {
-    let href_json = serde_json::to_string(href).unwrap_or_else(|_| "\"\"".to_string());
-    format!("window.gnosisGoTo({href_json});")
 }
 
 fn prev_script() -> &'static str {

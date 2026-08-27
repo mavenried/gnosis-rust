@@ -57,15 +57,6 @@ function post(message) {
     }
 }
 
-function flattenToc(items, depth = 0) {
-    const out = []
-    for (const item of items ?? []) {
-        out.push({ label: item.label, href: item.href, depth })
-        if (item.subitems) out.push(...flattenToc(item.subitems, depth + 1))
-    }
-    return out
-}
-
 const footerEl = document.getElementById('footer')
 const footerLocEl = document.getElementById('footer-loc')
 const footerPageEl = document.getElementById('footer-page')
@@ -244,6 +235,8 @@ function applyStyle() {
     rsvpOverlay.style.color = fg
     searchPanel.style.background = bg
     searchPanel.style.color = fg
+    tocPanel.style.background = bg
+    tocPanel.style.color = fg
 }
 
 window.gnosisSetStyle = style => {
@@ -428,6 +421,49 @@ document.addEventListener('keydown', e => {
     }
 })
 
+const tocPanel = document.getElementById('toc-panel')
+const tocCloseBtn = document.getElementById('toc-close')
+const tocListEl = document.getElementById('toc-list')
+
+function renderToc(items, depth = 0) {
+    for (const item of items ?? []) {
+        const btn = document.createElement('button')
+        btn.className = 'panel-item'
+        btn.style.paddingLeft = `${10 + depth * 16}px`
+        btn.textContent = item.label?.trim() || 'Untitled'
+        btn.addEventListener('click', () => {
+            post({ type: 'loading' })
+            view.goTo(item.href)
+            closeToc()
+        })
+        tocListEl.append(btn)
+        if (item.subitems) renderToc(item.subitems, depth + 1)
+    }
+}
+
+function closeToc() {
+    tocPanel.classList.remove('visible')
+}
+
+tocCloseBtn.addEventListener('click', closeToc)
+
+document.addEventListener('keydown', e => {
+    if (!tocPanel.classList.contains('visible')) return
+    if (e.key === 'Escape') {
+        closeToc()
+        e.preventDefault()
+    }
+})
+
+window.gnosisToggleToc = () => {
+    if (tocPanel.classList.contains('visible')) {
+        closeToc()
+    } else {
+        closeSearch()
+        tocPanel.classList.add('visible')
+    }
+}
+
 const searchPanel = document.getElementById('search-panel')
 const searchInput = document.getElementById('search-input')
 const searchCloseBtn = document.getElementById('search-close')
@@ -447,7 +483,7 @@ function escapeHtml(str) {
 
 function renderSearchResult(cfi, excerpt) {
     const btn = document.createElement('button')
-    btn.className = 'search-result'
+    btn.className = 'panel-item'
     btn.innerHTML = `${escapeHtml(excerpt.pre)}<mark>${escapeHtml(excerpt.match)}</mark>${escapeHtml(excerpt.post)}`
     btn.addEventListener('click', () => {
         post({ type: 'loading' })
@@ -527,6 +563,7 @@ window.gnosisToggleSearch = () => {
     if (searchPanel.classList.contains('visible')) {
         closeSearch()
     } else {
+        closeToc()
         searchPanel.classList.add('visible')
         searchInput.focus()
         searchInput.select()
@@ -542,6 +579,8 @@ window.gnosisOpenBook = async (bookId, lastCfi, style) => {
     console.log(`[cache] gnosisOpenBook bookId=${JSON.stringify(bookId)} lastCfi=${JSON.stringify(lastCfi)}`)
     try {
         if (style) window.gnosisSetStyle(style)
+        closeToc()
+        closeSearch()
         prefetched = new Set()
         prewarmed = new Set()
         view.close()
@@ -551,6 +590,8 @@ window.gnosisOpenBook = async (bookId, lastCfi, style) => {
         await view.open(book)
         console.log('[cache] view.open() resolved')
         pageListTotal = book?.pageList?.length ?? 0
+        tocListEl.replaceChildren()
+        renderToc(book?.toc)
         applyStyle()
         await view.init({
             lastLocation: lastCfi || undefined,
@@ -560,7 +601,6 @@ window.gnosisOpenBook = async (bookId, lastCfi, style) => {
         post({
             type: 'ready',
             title: book?.metadata?.title ?? null,
-            toc: flattenToc(book?.toc),
         })
     } catch (err) {
         const message = String((err && err.message) || err)
@@ -570,7 +610,6 @@ window.gnosisOpenBook = async (bookId, lastCfi, style) => {
     }
 }
 
-window.gnosisGoTo = href => view.goTo(href)
 window.gnosisNext = () => {
     markStart = 0
     mark('next() called')
