@@ -1,8 +1,7 @@
 <h1 align="center">Gnosis</h1>
 <p align="center">
 A clean, friendly ebook app for Linux — organize your library and read your
-books, with a reading experience inspired by
-<a href="https://github.com/johnfactotum/foliate">Foliate</a>.
+books.
 </p>
 
 ## What it does
@@ -58,8 +57,3 @@ Debian/Ubuntu), then:
 ```sh
 cargo run
 ```
-
-## Acknowledgments
-
-The reading engine is built natively in Rust using [epub-rs](https://github.com/lise-henry/epub-rs)
-and WebKitGTK with custom CSS multi-column pagination and HTML injection.
