@@ -82,6 +82,10 @@ enum ReaderMessage {
     Error {
         message: String,
     },
+    #[serde(rename = "openexternal")]
+    OpenExternal {
+        url: String,
+    },
 }
 
 pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
@@ -195,7 +199,7 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
     // The spinner for next/prev is driven entirely by JS's `loading` message
     // (sent only when the turn will cross a chapter boundary and may need to
     // load new content) rather than triggered here unconditionally, since a
-    // same-chapter turn is just foliate's own animation, not a real wait.
+    // same-chapter turn is just the reader's own animation, not a real wait.
     let web_view_for_prev = web_view.clone();
     prev_button.connect_clicked(move |_| {
         tracing::info!("dispatching prev_script (button)");
@@ -343,6 +347,12 @@ pub fn build(parent: &GnosisWindow) -> ReaderWidgets {
             ReaderMessage::Error { message } => {
                 spinner_for_msg.hide();
                 parent.show_reader_error(&message);
+            }
+            ReaderMessage::OpenExternal { url } => {
+                let _ = gtk::gio::AppInfo::launch_default_for_uri(
+                    &url,
+                    None::<&gtk::gio::AppLaunchContext>,
+                );
             }
         }
     });
@@ -493,10 +503,7 @@ fn build_display_settings(
 
         if dx.abs() > dy.abs() {
             swipe_active_for_scroll.set(true);
-            // foliate's own paginator caps a live drag to one page width in
-            // either direction, so a high multiplier here just means a light
-            // brush of the trackpad is enough to hit that cap and flip the
-            // page. Keep this low so a full page turn takes a deliberate swipe.
+            // Keep this low so a full page turn takes a deliberate swipe.
             const SCROLL_PIXELS_PER_UNIT: f64 = 10.0;
             let (px, py) = (dx * SCROLL_PIXELS_PER_UNIT, dy * SCROLL_PIXELS_PER_UNIT);
             let script = format!("window.gnosisScrollBy && window.gnosisScrollBy({px}, {py});");

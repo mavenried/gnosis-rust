@@ -61,6 +61,5 @@ cargo run
 
 ## Acknowledgments
 
-The reader is built on a vendored subset of
-[foliate-js](https://github.com/johnfactotum/foliate-js) by John Factotum,
-included under the MIT license (see `assets/foliate-js/LICENSE`).
+The reading engine is built natively in Rust using [epub-rs](https://github.com/lise-henry/epub-rs)
+and WebKitGTK with custom CSS multi-column pagination and HTML injection.

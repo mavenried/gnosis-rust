@@ -1362,6 +1362,16 @@ impl GnosisWindow {
             return;
         }
 
+        match library::epub_reader::EpubReader::open(book.id, &book.path) {
+            Ok(epub_reader) => {
+                super::reader_scheme::set_active_reader(epub_reader);
+            }
+            Err(err) => {
+                self.show_reader_error(&format!("Couldn't open book: {err}"));
+                return;
+            }
+        }
+
         let prefs = library::reader_prefs::load_for(book.id);
         (reader.apply_prefs)(&prefs);
 
